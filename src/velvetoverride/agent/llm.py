@@ -26,6 +26,18 @@ class LLMClient:
         self._client = anthropic.Anthropic(api_key=api_key)
         self._config = config
 
+    @staticmethod
+    def _extract_text(response) -> str:
+        """Safely extract text from Claude API response."""
+        if not response.content:
+            log.warning("llm.empty_response")
+            return ""
+        block = response.content[0]
+        if hasattr(block, "text"):
+            return block.text.strip()
+        log.warning("llm.unexpected_block_type", type=type(block).__name__)
+        return str(block)
+
     def answer_field(
         self,
         question: str,
@@ -73,7 +85,7 @@ Rules:
             messages=[{"role": "user", "content": prompt}],
         )
 
-        answer = response.content[0].text.strip()
+        answer = self._extract_text(response)
         log.info("llm.field_answer", question=question[:40], answer=answer[:60])
         return answer
 
@@ -93,7 +105,7 @@ Job description:
             messages=[{"role": "user", "content": prompt}],
         )
 
-        text = response.content[0].text.strip()
+        text = self._extract_text(response)
         keywords = [kw.strip().lower() for kw in text.split(",") if kw.strip()]
         log.info("llm.keywords_extracted", count=len(keywords))
         return keywords
@@ -132,7 +144,7 @@ Rules:
             messages=[{"role": "user", "content": prompt}],
         )
 
-        return response.content[0].text.strip()
+        return self._extract_text(response)
 
     def score_bullet_relevance(
         self,
@@ -170,7 +182,7 @@ Return nothing else."""
 
         # Parse scores
         scores = {}
-        for line in response.content[0].text.strip().split("\n"):
+        for line in self._extract_text(response).split("\n"):
             line = line.strip()
             if ":" in line:
                 parts = line.split(":")
@@ -217,4 +229,4 @@ Rules:
             messages=[{"role": "user", "content": prompt}],
         )
 
-        return response.content[0].text.strip()
+        return self._extract_text(response)

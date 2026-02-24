@@ -43,6 +43,7 @@ class ApplicationFlow:
         self._db = db
         self._questions: list[QuestionRecord] = []
         self._screenshot_count = 0
+        self._screenshot_paths: list[str] = []
 
     async def apply_to_job(
         self,
@@ -56,6 +57,7 @@ class ApplicationFlow:
         dry_run = self._config.bot.get("dry_run", True)
         self._questions = []
         self._screenshot_count = 0
+        self._screenshot_paths = []
 
         log.info(
             "apply.starting",
@@ -285,8 +287,13 @@ class ApplicationFlow:
         ss_dir.mkdir(parents=True, exist_ok=True)
         safe_company = "".join(c if c.isalnum() else "_" for c in listing.company)
         filename = f"{safe_company}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_step{self._screenshot_count}.png"
-        await self._page.screenshot(path=str(ss_dir / filename))
-        log.debug("apply.screenshot", path=str(ss_dir / filename))
+        ss_path = str(ss_dir / filename)
+        try:
+            await self._page.screenshot(path=ss_path)
+            self._screenshot_paths.append(ss_path)
+            log.debug("apply.screenshot", path=ss_path)
+        except Exception as e:
+            log.warning("apply.screenshot_failed", error=str(e), path=ss_path)
 
     def _make_record(
         self,
@@ -299,15 +306,26 @@ class ApplicationFlow:
         if status == ApplicationStatus.APPLIED and has_review_items:
             final_status = ApplicationStatus.NEEDS_REVIEW
 
+        jd = listing.description
+        if len(jd) > 5000:
+            log.debug(
+                "apply.jd_truncated",
+                original_len=len(jd),
+                truncated_to=5000,
+                company=listing.company,
+            )
+            jd = jd[:5000]
+
         return ApplicationRecord(
             job_url=listing.url,
             job_title=listing.title,
             company=listing.company,
             location=listing.location,
-            job_description=listing.description[:2000],
+            job_description=jd,
             status=final_status.value,
             match_score=listing.match_score,
             applied_at=datetime.utcnow().isoformat(),
             notes=notes,
+            screenshot_path=";".join(self._screenshot_paths) if self._screenshot_paths else "",
             questions=self._questions,
         )

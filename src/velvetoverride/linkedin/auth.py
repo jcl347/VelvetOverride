@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import random
 from typing import TYPE_CHECKING
 
 from velvetoverride.browser.captcha import detect_captcha, handle_captcha
-from velvetoverride.browser.stealth import human_type, random_delay
+from velvetoverride.browser.stealth import random_delay
 from velvetoverride.utils.logging import get_logger
 
 if TYPE_CHECKING:
@@ -56,13 +57,13 @@ async def login(page: Page, config: Config) -> bool:
     # Fill email
     email_input = page.locator("#username")
     await email_input.fill("")
-    await email_input.type(email, delay=random_delay)
+    await email_input.type(email, delay=random.randint(50, 150))
     await random_delay(0.5, 1.5)
 
     # Fill password
     password_input = page.locator("#password")
     await password_input.fill("")
-    await password_input.type(password, delay=random_delay)
+    await password_input.type(password, delay=random.randint(50, 150))
     await random_delay(0.5, 1.0)
 
     # Click sign in

@@ -27,6 +27,7 @@ def export_csv(db: TrackingDB, output_path: str | Path) -> Path:
         writer.writerow([
             "ID", "Job URL", "Job Title", "Company", "Location",
             "Status", "Match Score", "Resume Version", "Applied At",
+            "Salary Min", "Salary Max", "Salary Raw",
             "Questions Count", "Needs Review", "Notes",
         ])
         for app in applications:
@@ -35,6 +36,7 @@ def export_csv(db: TrackingDB, output_path: str | Path) -> Path:
                 app.id, app.job_url, app.job_title, app.company,
                 app.location, app.status, f"{app.match_score:.1f}",
                 app.resume_version, app.applied_at,
+                app.salary_min or "", app.salary_max or "", app.salary_raw,
                 len(app.questions), needs_review, app.notes,
             ])
 
@@ -56,11 +58,14 @@ def export_json(db: TrackingDB, output_path: str | Path) -> Path:
             "job_title": app.job_title,
             "company": app.company,
             "location": app.location,
-            "job_description": app.job_description[:500],
+            "job_description": app.job_description,
             "status": app.status,
             "match_score": app.match_score,
             "resume_version": app.resume_version,
             "applied_at": app.applied_at,
+            "salary_min": app.salary_min,
+            "salary_max": app.salary_max,
+            "salary_raw": app.salary_raw,
             "notes": app.notes,
             "questions": [
                 {

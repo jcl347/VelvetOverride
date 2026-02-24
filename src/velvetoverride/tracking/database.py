@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -31,7 +32,8 @@ CREATE TABLE IF NOT EXISTS applications (
     screenshot_path TEXT DEFAULT '',
     salary_min INTEGER DEFAULT NULL,
     salary_max INTEGER DEFAULT NULL,
-    salary_raw TEXT DEFAULT ''
+    salary_raw TEXT DEFAULT '',
+    run_id INTEGER DEFAULT NULL
 );
 
 CREATE TABLE IF NOT EXISTS questions (
@@ -45,11 +47,38 @@ CREATE TABLE IF NOT EXISTS questions (
     FOREIGN KEY (application_id) REFERENCES applications(id)
 );
 
+CREATE TABLE IF NOT EXISTS runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    started_at TEXT NOT NULL,
+    finished_at TEXT DEFAULT NULL,
+    status TEXT DEFAULT 'running',
+    dry_run INTEGER DEFAULT 1,
+    max_apps INTEGER DEFAULT 25,
+    min_salary INTEGER DEFAULT NULL,
+    max_salary INTEGER DEFAULT NULL,
+    listings_found INTEGER DEFAULT 0,
+    listings_after_filter INTEGER DEFAULT 0,
+    applied_count INTEGER DEFAULT 0,
+    failed_count INTEGER DEFAULT 0,
+    skipped_count INTEGER DEFAULT 0,
+    error_message TEXT DEFAULT '',
+    config_snapshot TEXT DEFAULT ''
+);
+
 CREATE INDEX IF NOT EXISTS idx_applications_url ON applications(job_url);
 CREATE INDEX IF NOT EXISTS idx_applications_company ON applications(company);
 CREATE INDEX IF NOT EXISTS idx_applications_status ON applications(status);
 CREATE INDEX IF NOT EXISTS idx_questions_review ON questions(needs_review);
+CREATE INDEX IF NOT EXISTS idx_applications_run ON applications(run_id);
 """
+
+# Migration: add columns to existing databases that lack them
+MIGRATIONS = [
+    "ALTER TABLE applications ADD COLUMN salary_min INTEGER DEFAULT NULL",
+    "ALTER TABLE applications ADD COLUMN salary_max INTEGER DEFAULT NULL",
+    "ALTER TABLE applications ADD COLUMN salary_raw TEXT DEFAULT ''",
+    "ALTER TABLE applications ADD COLUMN run_id INTEGER DEFAULT NULL",
+]
 
 
 class TrackingDB:
@@ -63,8 +92,19 @@ class TrackingDB:
     def connect(self) -> None:
         self._conn = sqlite3.connect(str(self._db_path))
         self._conn.row_factory = sqlite3.Row
+        self._conn.execute("PRAGMA foreign_keys = ON")
         self._conn.executescript(SCHEMA)
+        self._run_migrations()
         log.info("tracking.db_connected", path=str(self._db_path))
+
+    def _run_migrations(self) -> None:
+        """Apply schema migrations for existing databases."""
+        for sql in MIGRATIONS:
+            try:
+                self.conn.execute(sql)
+                self.conn.commit()
+            except sqlite3.OperationalError:
+                pass  # Column already exists
 
     @property
     def conn(self) -> sqlite3.Connection:
@@ -78,6 +118,79 @@ class TrackingDB:
             self._conn.close()
             self._conn = None
 
+    # ── Run tracking ──
+
+    def start_run(
+        self,
+        dry_run: bool,
+        max_apps: int,
+        min_salary: int | None = None,
+        max_salary: int | None = None,
+        config_snapshot: str = "",
+    ) -> int:
+        """Record the start of a bot run. Returns the run ID."""
+        cursor = self.conn.execute(
+            """INSERT INTO runs
+               (started_at, dry_run, max_apps, min_salary, max_salary, config_snapshot)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (
+                datetime.utcnow().isoformat(),
+                1 if dry_run else 0,
+                max_apps,
+                min_salary,
+                max_salary,
+                config_snapshot,
+            ),
+        )
+        self.conn.commit()
+        run_id = cursor.lastrowid
+        assert run_id is not None
+        log.info("tracking.run_started", run_id=run_id)
+        return run_id
+
+    def finish_run(
+        self,
+        run_id: int,
+        status: str = "completed",
+        listings_found: int = 0,
+        listings_after_filter: int = 0,
+        applied_count: int = 0,
+        failed_count: int = 0,
+        skipped_count: int = 0,
+        error_message: str = "",
+    ) -> None:
+        """Record the end of a bot run."""
+        self.conn.execute(
+            """UPDATE runs SET
+               finished_at = ?, status = ?,
+               listings_found = ?, listings_after_filter = ?,
+               applied_count = ?, failed_count = ?, skipped_count = ?,
+               error_message = ?
+               WHERE id = ?""",
+            (
+                datetime.utcnow().isoformat(),
+                status,
+                listings_found,
+                listings_after_filter,
+                applied_count,
+                failed_count,
+                skipped_count,
+                error_message,
+                run_id,
+            ),
+        )
+        self.conn.commit()
+        log.info("tracking.run_finished", run_id=run_id, status=status)
+
+    def get_runs(self, limit: int = 20) -> list[dict]:
+        """Get recent run records."""
+        rows = self.conn.execute(
+            "SELECT * FROM runs ORDER BY started_at DESC LIMIT ?", (limit,)
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    # ── Application tracking ──
+
     def is_already_applied(self, job_url: str) -> bool:
         """Check if we've already applied to this job URL."""
         row = self.conn.execute(
@@ -85,14 +198,14 @@ class TrackingDB:
         ).fetchone()
         return row is not None
 
-    def save_application(self, record: ApplicationRecord) -> int:
+    def save_application(self, record: ApplicationRecord, run_id: int | None = None) -> int:
         """Insert an application record and its questions. Returns the ID."""
         cursor = self.conn.execute(
             """INSERT INTO applications
                (job_url, job_title, company, location, job_description,
                 status, resume_version, match_score, applied_at, notes, screenshot_path,
-                salary_min, salary_max, salary_raw)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                salary_min, salary_max, salary_raw, run_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 record.job_url,
                 record.job_title,
@@ -108,6 +221,7 @@ class TrackingDB:
                 record.salary_min,
                 record.salary_max,
                 record.salary_raw,
+                run_id,
             ),
         )
         app_id = cursor.lastrowid
@@ -190,8 +304,21 @@ class TrackingDB:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    def approve_answer(self, question_id: int) -> dict | None:
+        """Mark a question as reviewed and return it for learning. Returns the Q&A pair."""
+        row = self.conn.execute(
+            "SELECT * FROM questions WHERE id = ?", (question_id,)
+        ).fetchone()
+        if not row:
+            return None
+        self.conn.execute(
+            "UPDATE questions SET needs_review = 0 WHERE id = ?", (question_id,)
+        )
+        self.conn.commit()
+        return dict(row)
+
     def get_stats(self) -> dict:
-        """Return summary statistics."""
+        """Return comprehensive summary statistics."""
         total = self.conn.execute("SELECT COUNT(*) FROM applications").fetchone()[0]
         by_status = {}
         for row in self.conn.execute(
@@ -203,10 +330,54 @@ class TrackingDB:
             "SELECT COUNT(*) FROM questions WHERE needs_review = 1"
         ).fetchone()[0]
 
+        # Answer source breakdown
+        by_source = {}
+        for row in self.conn.execute(
+            "SELECT answer_source, COUNT(*) as cnt FROM questions GROUP BY answer_source"
+        ).fetchall():
+            by_source[row["answer_source"]] = row["cnt"]
+
+        # Salary statistics
+        salary_stats = self.conn.execute(
+            """SELECT
+                COUNT(CASE WHEN salary_min IS NOT NULL THEN 1 END) as with_salary,
+                COUNT(CASE WHEN salary_min IS NULL THEN 1 END) as without_salary,
+                MIN(salary_min) as min_salary,
+                MAX(salary_max) as max_salary,
+                AVG(salary_min) as avg_min,
+                AVG(salary_max) as avg_max
+               FROM applications"""
+        ).fetchone()
+
+        # Failure reasons (top 5)
+        failure_notes = self.conn.execute(
+            """SELECT notes, COUNT(*) as cnt FROM applications
+               WHERE status = 'failed' AND notes != ''
+               GROUP BY notes ORDER BY cnt DESC LIMIT 5"""
+        ).fetchall()
+
+        # Recent runs
+        recent_runs = self.conn.execute(
+            "SELECT * FROM runs ORDER BY started_at DESC LIMIT 5"
+        ).fetchall()
+
         return {
             "total_applications": total,
             "by_status": by_status,
             "questions_needing_review": review_count,
+            "answers_by_source": by_source,
+            "salary": {
+                "with_salary": salary_stats["with_salary"] if salary_stats else 0,
+                "without_salary": salary_stats["without_salary"] if salary_stats else 0,
+                "range_min": salary_stats["min_salary"] if salary_stats else None,
+                "range_max": salary_stats["max_salary"] if salary_stats else None,
+                "avg_min": round(salary_stats["avg_min"]) if salary_stats and salary_stats["avg_min"] else None,
+                "avg_max": round(salary_stats["avg_max"]) if salary_stats and salary_stats["avg_max"] else None,
+            },
+            "top_failure_reasons": [
+                {"reason": r["notes"], "count": r["cnt"]} for r in failure_notes
+            ],
+            "recent_runs": [dict(r) for r in recent_runs],
         }
 
     def find_similar_jobs(self, title: str, company: str) -> list[ApplicationRecord]:

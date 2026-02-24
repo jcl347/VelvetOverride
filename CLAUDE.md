@@ -174,7 +174,7 @@ VelvetOverride/
 │   ├── test_resume.py           # Resume builder + ATS scorer (7 tests)
 │   ├── test_salary.py           # Salary extraction + filtering (20 tests)
 │   ├── test_search.py           # Search URL builder (6 tests)
-│   └── test_tracking.py         # SQLite database (6 tests)
+│   └── test_tracking.py         # SQLite database + run tracking + approvals (22 tests)
 └── data/                        # (gitignored)
     ├── applications.db          # SQLite tracking database
     └── resumes/                 # Generated tailored resume PDFs
@@ -342,6 +342,39 @@ Implementation: `src/velvetoverride/browser/captcha.py` → `detect_captcha()`,
 `handle_captcha()`. Integrated into `linkedin/auth.py` login flow and `main.py`
 post-login check.
 
+### 10. Run-Level Tracking & History
+Every bot execution is tracked as a "run" with full metadata: start/end time,
+dry-run vs live mode, salary filters, listings found/filtered, applications
+applied/failed/skipped, error messages, and a config snapshot. This enables
+trend analysis across runs (e.g., "are my applications getting rejected more
+often?"), debugging failed runs without digging through logs, and understanding
+how filter changes affect application volume.
+
+Implementation: `src/velvetoverride/tracking/database.py` → `start_run()`,
+`finish_run()`, `get_runs()`. Wired into `main.py` orchestrator. CLI via
+`velvetoverride runs`.
+
+### 11. Interactive Answer Approval with YAML Persistence
+The `velvetoverride review --approve` command provides an interactive CLI workflow
+where humans can approve or correct LLM-generated answers. Corrections are
+immediately persisted to the `learned` section of `config/answers.yaml`, closing
+the feedback loop: on the next run, the bot uses the corrected answer directly
+from config (Tier 1) instead of invoking the LLM again.
+
+Implementation: `src/velvetoverride/main.py` → `review` command with `--approve`
+flag, `_persist_learned_answers()`. Uses `field_solver.learn_answer()` +
+`db.approve_answer()`.
+
+### 12. Resume Fallback Strategy
+When LLM-powered resume tailoring fails (API error, rate limit, content issue),
+the bot falls back to the most recently generated resume in `data/resumes/`, or
+a configured static resume path. This ensures applications are never skipped
+solely because resume generation failed — a degraded resume is better than no
+application.
+
+Implementation: `src/velvetoverride/main.py` → `_find_default_resume()`, fallback
+logic in the apply loop.
+
 ---
 
 ## How to Run
@@ -385,9 +418,11 @@ velvetoverride run [--dry-run|--live] [-v]   # Run the application bot
   --max-apps N                               # Max applications this run
   --min-salary N                             # Minimum annual salary (e.g. 100000)
   --max-salary N                             # Maximum annual salary (e.g. 200000)
-velvetoverride stats                         # Show application statistics
-velvetoverride export [--format csv|json]    # Export tracking data
+velvetoverride stats                         # Show enriched statistics (salary, sources, failures, runs)
+velvetoverride export [--format csv|json]    # Export tracking data (includes salary fields)
 velvetoverride review                        # Show questions needing review
+velvetoverride review --approve              # Interactively approve/correct answers (persists to YAML)
+velvetoverride runs [--limit N]              # Show recent bot run history
 velvetoverride tailor TITLE COMPANY JD_FILE  # Generate a tailored resume only
 ```
 
@@ -475,6 +510,232 @@ All phases are **implemented**:
 - CAPTCHA integration into login flow and post-login verification
 - CLI `--max-apps` flag to control application count per run
 - 57-test suite covering config, field solver, resume, salary, search, and tracking
+
+### Phase 7: Observability, Resilience & Bug Fixes (DONE)
+
+Comprehensive audit of the entire codebase identified 30 issues across 8 categories.
+All critical and high-priority issues were fixed. See the **Design Strategy & Audit**
+section below for the full analysis.
+
+**Bug fixes:**
+- Fuzzy dedup `continue` was in the inner loop scope, silently applying to duplicates
+- Auth login `delay=random_delay` passed an async function object instead of integer ms
+- LLM response extraction crashed on empty/unexpected response content blocks
+
+**Data completeness:**
+- Salary data (min, max, raw) now included in CSV and JSON exports
+- Screenshot paths tracked per form step and linked to application records
+- Job description truncation increased to 5,000 chars with logging when it occurs
+- Full job descriptions exported in JSON (previously truncated to 500 chars)
+
+**Run-level tracking:**
+- New `runs` table tracks every bot execution (start/end time, config, counts, errors)
+- Applications linked to their run via `run_id` foreign key
+- `velvetoverride runs` CLI command shows run history
+- Run status properly set on all exit paths (login fail, CAPTCHA fail, completion, crash)
+
+**Enriched observability:**
+- `velvetoverride stats` now shows: answer source breakdown, salary statistics,
+  top failure reasons, and recent run history
+- File-based logging support via `log_dir` parameter (alongside stderr)
+
+**Answer memory persistence:**
+- `velvetoverride review --approve` interactive workflow: approve or correct LLM answers
+- Approved/corrected answers persisted to `config/answers.yaml` `learned` section
+- On future runs, learned answers are used directly (zero API cost)
+
+**Resilience:**
+- Resume fallback: when LLM tailoring fails, falls back to most recent resume or
+  configured static resume path
+- FK enforcement (`PRAGMA foreign_keys = ON`) for database integrity
+- Schema migrations for existing databases (safe `ALTER TABLE` with error handling)
+- Fatal error handling: run status set to "failed" with error message before crash
+
+**Test suite: 70 tests** covering config (3), field solver (18), resume (7),
+salary (20), search (6), tracking + runs + approvals (22 — up from 6).
+
+---
+
+## Design Strategy & Audit
+
+### Audit Methodology
+
+A full-codebase audit was conducted to identify failure points, data loss risks,
+and silent errors. The audit examined every file in the `src/` tree against these
+categories:
+
+1. **Data Loss** — Where does information get dropped or fail to persist?
+2. **Silent Failures** — Where do errors get swallowed without visibility?
+3. **Error Handling** — Where can crashes occur from unvalidated inputs?
+4. **Database Issues** — Schema gaps, missing constraints, query safety?
+5. **Logic Bugs** — Incorrect control flow, wrong variable scope, type errors?
+6. **Configuration** — Edge cases in YAML loading, missing keys, type coercion?
+7. **Logging Gaps** — Where do operations complete without any trace?
+
+### Critical Bugs Found & Fixed
+
+#### 1. Fuzzy Dedup Loop Scope Bug (`main.py`)
+**Severity: Critical (Data Loss)**
+
+The `continue` statement inside the fuzzy dedup check was in the inner `for s
+in similar` loop, not the outer `for i, listing in enumerate(listings)` loop.
+This meant that even when a fuzzy duplicate was detected, the bot would still
+apply to the job — the `continue` only skipped one iteration of the similarity
+check, not the application.
+
+**Fix:** Introduced `is_fuzzy_dup` flag with `break` from inner loop, then
+`if is_fuzzy_dup: continue` at the outer loop level.
+
+```python
+# Before (broken):
+for s in similar:
+    if fuzz.ratio(...) > 85:
+        continue  # ← Only skips inner loop iteration!
+
+# After (fixed):
+is_fuzzy_dup = False
+for s in similar:
+    if fuzz.ratio(...) > 85:
+        is_fuzzy_dup = True
+        break
+if is_fuzzy_dup:
+    continue  # ← Correctly skips the outer application loop
+```
+
+#### 2. Auth Typing Delay Type Error (`auth.py`)
+**Severity: Critical (Runtime Crash)**
+
+`delay=random_delay` passed the async function object (from `stealth.py`) instead
+of calling `random.randint(50, 150)` for a numeric millisecond value. Playwright's
+`.type()` method expects an integer for the `delay` parameter. This would cause
+either a type error or bizarre behavior depending on how Playwright handles a
+coroutine object as a delay value.
+
+**Fix:** Replaced with `delay=random.randint(50, 150)` using stdlib `random`.
+
+#### 3. LLM Empty Response Crash (`llm.py`)
+**Severity: High (Runtime Crash)**
+
+All 5 LLM API call sites used `response.content[0].text.strip()` without checking
+if `response.content` was empty or if the first block had a `text` attribute. An
+empty response (API error, rate limit, content filter) would crash with `IndexError`.
+
+**Fix:** Introduced `_extract_text()` static method that safely handles:
+- Empty `response.content` → returns `""` with warning log
+- Block without `text` attribute → returns `str(block)` with warning log
+- Normal case → returns `block.text.strip()`
+
+### Data Flow Design
+
+```
+                    ┌──────────────────────────────────────────────┐
+                    │              Bot Run Lifecycle               │
+                    │                                              │
+                    │  db.start_run() ──→ run_id                  │
+                    │       │                                      │
+                    │       ▼                                      │
+                    │  Login ──→ fail? ──→ finish_run("failed")   │
+                    │       │                                      │
+                    │       ▼                                      │
+                    │  Search ──→ 0 listings? ──→ finish_run()    │
+                    │       │                                      │
+                    │       ▼                                      │
+                    │  Score → Filter → For each:                  │
+                    │       │                                      │
+                    │       ├─ Dedup (URL + fuzzy)                 │
+                    │       ├─ Tailor resume (fallback on fail)    │
+                    │       ├─ Apply (fill forms, screenshot)      │
+                    │       └─ save_application(record, run_id)    │
+                    │       │                                      │
+                    │       ▼                                      │
+                    │  Export CSV/JSON ──→ finish_run("completed") │
+                    │                                              │
+                    │  On crash: finish_run("failed", error=...)   │
+                    └──────────────────────────────────────────────┘
+```
+
+### Answer Memory Lifecycle
+
+```
+  Novel question ──→ LLM generates answer ──→ Saved with needs_review=True
+                                                        │
+                                                        ▼
+                                          velvetoverride review --approve
+                                                        │
+                                            ┌───────────┼───────────┐
+                                            ▼           ▼           ▼
+                                         [a]pprove  [c]orrect   [s]kip
+                                            │           │
+                                            ▼           ▼
+                                   db.approve_answer()  db.approve_answer()
+                                   learn_answer(q, a)   learn_answer(q, new_a)
+                                            │           │
+                                            └─────┬─────┘
+                                                  ▼
+                                    _persist_learned_answers()
+                                    → writes to answers.yaml
+                                                  │
+                                                  ▼
+                                    Next run: Tier 1 lookup hits
+                                    → zero API cost, zero latency
+```
+
+### Observability Stack
+
+| Layer | What | Where |
+|---|---|---|
+| **stderr** | Real-time structured logs | Console (structlog ConsoleRenderer) |
+| **File logs** | Persistent JSON logs per run | `data/logs/velvetoverride_YYYYMMDD_HHMMSS.log` |
+| **Screenshots** | Visual audit trail per form step | `screenshots/<company>_<timestamp>_stepN.png` |
+| **SQLite: runs** | Run-level metadata | `data/applications.db` → `runs` table |
+| **SQLite: applications** | Per-job outcome + salary | `data/applications.db` → `applications` table |
+| **SQLite: questions** | Per-field Q&A + source + review flag | `data/applications.db` → `questions` table |
+| **CSV export** | Spreadsheet-friendly summary | `data/applications.csv` |
+| **JSON export** | Full data including JDs and questions | `data/applications.json` |
+| **Review queue** | Questions needing human review | `data/review_queue.json` |
+| **CLI: stats** | Enriched dashboard (sources, salary, failures, runs) | `velvetoverride stats` |
+| **CLI: runs** | Run history with per-run counts | `velvetoverride runs` |
+| **CLI: review** | Interactive approval workflow | `velvetoverride review --approve` |
+
+### Database Schema (v2)
+
+```sql
+-- Run-level tracking (new)
+CREATE TABLE runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    started_at TEXT NOT NULL,
+    finished_at TEXT DEFAULT NULL,
+    status TEXT DEFAULT 'running',       -- running, completed, failed
+    dry_run INTEGER DEFAULT 1,
+    max_apps INTEGER DEFAULT 25,
+    min_salary INTEGER DEFAULT NULL,
+    max_salary INTEGER DEFAULT NULL,
+    listings_found INTEGER DEFAULT 0,
+    listings_after_filter INTEGER DEFAULT 0,
+    applied_count INTEGER DEFAULT 0,
+    failed_count INTEGER DEFAULT 0,
+    skipped_count INTEGER DEFAULT 0,
+    error_message TEXT DEFAULT '',
+    config_snapshot TEXT DEFAULT ''       -- JSON snapshot of search config
+);
+
+-- Application tracking (enhanced)
+CREATE TABLE applications (
+    -- ... existing columns ...
+    salary_min INTEGER DEFAULT NULL,     -- new: extracted salary floor
+    salary_max INTEGER DEFAULT NULL,     -- new: extracted salary ceiling
+    salary_raw TEXT DEFAULT '',           -- new: raw salary text from JD
+    run_id INTEGER DEFAULT NULL,         -- new: links to runs table
+    screenshot_path TEXT DEFAULT ''       -- now populated with semicolon-joined paths
+);
+
+-- FK enforcement enabled
+PRAGMA foreign_keys = ON;
+
+-- Schema migrations handle existing databases safely
+ALTER TABLE applications ADD COLUMN salary_min INTEGER DEFAULT NULL;
+-- (silently ignored if column already exists)
+```
 
 ---
 
