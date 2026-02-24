@@ -1,0 +1,176 @@
+# ─── Predetermined Answers for Known LinkedIn Easy Apply Questions ──
+# These are matched by keyword patterns in the question text.
+# The bot checks these BEFORE falling back to the LLM, saving cost.
+
+# ─── Yes/No Questions (Radio Buttons) ─────────────────────────
+yes_no:
+  legally_authorized:
+    patterns:
+      - "legally authorized"
+      - "authorized to work"
+      - "eligible to work"
+      - "right to work"
+    answer: true
+
+  visa_sponsorship:
+    patterns:
+      - "sponsorship"
+      - "require visa"
+      - "immigration sponsorship"
+      - "H-1B"
+      - "work visa"
+    answer: false
+
+  drivers_license:
+    patterns:
+      - "driver's license"
+      - "drivers license"
+      - "driving license"
+      - "valid license"
+    answer: true
+
+  commute:
+    patterns:
+      - "commute"
+      - "reliable transportation"
+    answer: true
+
+  willing_to_relocate:
+    patterns:
+      - "relocate"
+      - "relocation"
+      - "willing to move"
+    answer: true
+
+  start_immediately:
+    patterns:
+      - "start immediately"
+      - "urgent"
+      - "immediate start"
+      - "available to start"
+    answer: true
+
+  background_check:
+    patterns:
+      - "background check"
+      - "background screening"
+    answer: true
+
+  drug_test:
+    patterns:
+      - "drug test"
+      - "drug screen"
+    answer: true
+
+  non_compete:
+    patterns:
+      - "non-compete"
+      - "noncompete"
+      - "non compete"
+    answer: false
+
+  previous_employee:
+    patterns:
+      - "previously employed"
+      - "former employee"
+      - "worked at"
+      - "previously worked"
+    answer: false
+
+# ─── EEO / Voluntary Self-Identification (Decline to answer) ──
+eeo:
+  # For dropdown selects, pick the option matching these keywords
+  decline_keywords:
+    - "decline"
+    - "prefer not"
+    - "don't wish"
+    - "do not wish"
+    - "not specified"
+    - "choose not"
+
+  # Question patterns that trigger EEO handling
+  patterns:
+    - "gender"
+    - "sex"
+    - "race"
+    - "ethnicity"
+    - "veteran"
+    - "disability"
+    - "demographic"
+    - "protected"
+
+# ─── Numeric Questions ─────────────────────────────────────────
+# Answered from profile.yaml's technology_experience section.
+# These patterns help identify what technology the question is about.
+numeric:
+  experience_patterns:
+    - "years of experience"
+    - "how many years"
+    - "years do you have"
+    - "experience with"
+    - "experience in"
+    - "experience using"
+
+  # Salary expectations (if asked)
+  salary:
+    patterns:
+      - "salary"
+      - "compensation"
+      - "pay expectation"
+      - "desired pay"
+    answer: "150000"
+
+# ─── Education Questions ──────────────────────────────────────
+education:
+  degree_patterns:
+    - "highest degree"
+    - "education level"
+    - "degree"
+    - "qualification"
+  # Value to select from dropdown; should match common LinkedIn options
+  answer: "Bachelor's Degree"
+
+  has_degree:
+    patterns:
+      - "do you have a degree"
+      - "bachelor"
+      - "completed degree"
+    answer: true
+
+# ─── Text Field Defaults ──────────────────────────────────────
+text_defaults:
+  # Fallback for LinkedIn URL field
+  linkedin_url:
+    patterns:
+      - "linkedin"
+      - "linkedin profile"
+      - "linkedin url"
+    # Pulled from profile.yaml at runtime
+
+  website:
+    patterns:
+      - "website"
+      - "portfolio"
+      - "personal site"
+      - "url"
+      - "github"
+    # Pulled from profile.yaml at runtime
+
+  # Cover letter (short default — LLM generates better ones per job)
+  cover_letter:
+    patterns:
+      - "cover letter"
+      - "letter of interest"
+      - "why are you interested"
+      - "why do you want"
+    use_llm: true
+
+# ─── Answer Memory ─────────────────────────────────────────────
+# This section is auto-populated by the bot as it learns from
+# human corrections. Format:
+#   learned:
+#     "<exact question text>":
+#       answer: "<corrected answer>"
+#       field_type: "text|radio|dropdown|checkbox"
+#       added_date: "2026-01-15"
+learned: {}

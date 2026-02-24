@@ -130,56 +130,51 @@ Based on patterns from [Eezzeldin/LinkedinEasyApplybot](https://github.com/Eezze
 
 ```
 VelvetOverride/
-├── CLAUDE.md                    # This file
-├── pyproject.toml               # Project config (uv/pip)
+├── CLAUDE.md                    # This file — research, architecture, run instructions
+├── pyproject.toml               # Project config, dependencies, CLI entry point
+├── .gitignore
 ├── config/
-│   ├── settings.yaml            # Bot settings (rate limits, filters, browser config)
-│   ├── profile.yaml             # User profile data (master resume, personal info)
-│   ├── answers.yaml             # Predetermined answers for known question types
-│   └── .env                     # Secrets (LinkedIn creds, API keys) — GITIGNORED
+│   ├── settings.yaml            # Bot behavior, search filters, browser, LLM, rate limits
+│   ├── profile.yaml             # Master resume data (experience, skills, education)
+│   ├── answers.yaml             # Predetermined answers + learned answer memory
+│   └── .env.example             # Template for secrets (copy to .env)
 ├── src/
 │   └── velvetoverride/
 │       ├── __init__.py
-│       ├── main.py              # CLI entry point / orchestrator
+│       ├── main.py              # CLI entry point (click) / orchestrator / bot loop
 │       ├── browser/
-│       │   ├── __init__.py
-│       │   ├── engine.py        # Patchright browser setup & lifecycle
-│       │   ├── stealth.py       # Anti-detection config & human-like behavior
-│       │   └── pages.py         # Page object models for LinkedIn pages
+│       │   ├── engine.py        # Patchright browser launch & lifecycle
+│       │   └── stealth.py       # Human-like behavior (typing, scrolling, diversification)
 │       ├── linkedin/
-│       │   ├── __init__.py
-│       │   ├── auth.py          # Login & session management
-│       │   ├── search.py        # Job search & listing scraper
-│       │   ├── apply.py         # Application flow controller
-│       │   └── fields.py        # Form field detection & interaction
+│       │   ├── auth.py          # Login, session reuse, checkpoint handling
+│       │   ├── search.py        # Job search URL builder, listing scraper, filters
+│       │   ├── apply.py         # Multi-step Easy Apply form walker
+│       │   └── fields.py        # Form field detection (7 types), label extraction
 │       ├── agent/
-│       │   ├── __init__.py
-│       │   ├── llm.py           # Claude API client (form Q&A, resume tailoring)
-│       │   ├── field_solver.py  # Hybrid: config lookup → LLM fallback for fields
-│       │   └── resume_tailor.py # JD analysis → keyword extraction → resume gen
+│       │   ├── llm.py           # Claude API client (Q&A, keyword extraction, tailoring)
+│       │   ├── field_solver.py  # 5-tier hybrid solver (learned→config→profile→EEO→LLM)
+│       │   └── resume_tailor.py # JD analysis → bullet ranking → summary rewrite → PDF
 │       ├── resume/
-│       │   ├── __init__.py
-│       │   ├── builder.py       # YAML → Jinja2 → PDF pipeline
-│       │   ├── scorer.py        # ATS keyword match scoring
-│       │   └── templates/       # Jinja2 LaTeX/HTML resume templates
-│       │       └── default.tex.j2
+│       │   ├── builder.py       # Jinja2 → HTML → PDF (WeasyPrint) pipeline
+│       │   ├── scorer.py        # ATS keyword coverage scoring & suggestions
+│       │   └── templates/
+│       │       └── default.html.j2  # Professional ATS-friendly resume template
 │       ├── tracking/
-│       │   ├── __init__.py
-│       │   ├── database.py      # SQLite schema & CRUD operations
-│       │   ├── models.py        # Application, Company, Question data models
-│       │   └── export.py        # CSV/JSON export for human review
+│       │   ├── database.py      # SQLite schema, CRUD, dedup, stats, review queue
+│       │   ├── models.py        # ApplicationRecord, QuestionRecord, JobListing, enums
+│       │   └── export.py        # CSV/JSON/review-queue export
 │       └── utils/
-│           ├── __init__.py
-│           ├── config.py        # YAML config loader
-│           └── logging.py       # Structured logging
+│           ├── config.py        # YAML config loader, .env secrets, Config dataclass
+│           └── logging.py       # structlog setup (console + JSON modes)
 ├── tests/
-│   ├── test_fields.py           # Form field detection tests
-│   ├── test_resume.py           # Resume generation tests
-│   ├── test_tracking.py         # Database tests
-│   └── test_agent.py            # LLM integration tests
-└── data/
-    ├── applications.db          # SQLite database (gitignored)
-    └── resumes/                 # Generated resume PDFs (gitignored)
+│   ├── test_config.py           # Config loading (3 tests)
+│   ├── test_field_solver.py     # Hybrid field solver (18 tests)
+│   ├── test_resume.py           # Resume builder + ATS scorer (7 tests)
+│   ├── test_search.py           # Search URL builder (6 tests)
+│   └── test_tracking.py         # SQLite database (6 tests)
+└── data/                        # (gitignored)
+    ├── applications.db          # SQLite tracking database
+    └── resumes/                 # Generated tailored resume PDFs
 ```
 
 ### Core Flow
@@ -249,42 +244,192 @@ VelvetOverride/
 
 ---
 
+## Innovations Beyond Existing Bots
+
+These features are novel relative to the existing open-source landscape:
+
+### 1. Answer Memory System (Self-Improving)
+When the bot encounters a novel question and the LLM generates an answer, that
+Q&A pair is flagged for human review. Once approved/corrected, it's stored in the
+`learned` section of `answers.yaml`. On subsequent runs, the bot uses the learned
+answer directly — **zero API cost, zero latency**. Over time, the bot converges
+toward needing the LLM less and less as its answer memory grows.
+
+Implementation: `src/velvetoverride/agent/field_solver.py` → `learn_answer()` method
+and Tier 1 lookup in `solve()`.
+
+### 2. Job Match Scoring & Prioritization
+Before applying, the bot scores each job listing's description against your profile
+skills using keyword overlap analysis. Listings are sorted by match score (highest
+first), and a configurable `min_match_score` threshold filters out poor-fit roles.
+This means the bot applies to your **best-fit jobs first**, maximizing return on
+the limited applications-per-session budget.
+
+Implementation: `src/velvetoverride/main.py` → `_score_listings()`.
+
+### 3. Fuzzy Duplicate Detection
+Beyond exact URL dedup, the bot uses fuzzy string matching (`thefuzz` / Levenshtein
+distance) to detect when the same job has been reposted under a slightly different
+title or URL. This prevents wasting applications on duplicates that recruiters or
+staffing agencies repost.
+
+Implementation: `src/velvetoverride/main.py` → fuzzy matching in the apply loop.
+
+### 4. Per-Step Screenshot Capture
+Every form step is optionally screenshotted and saved with a timestamped filename.
+This creates a visual audit trail for debugging form navigation issues and for
+human review of what the bot actually did. Essential for calibrating the bot
+during dry-run mode.
+
+Implementation: `src/velvetoverride/linkedin/apply.py` → `_maybe_screenshot()`.
+
+### 5. ATS Self-Scoring Before Submission
+Before uploading a tailored resume, the bot scores it against the extracted JD
+keywords. If keyword coverage is below the target threshold (default 70%), it
+can flag the resume for manual improvement. This ensures every submitted resume
+has a fighting chance of passing ATS screening.
+
+Implementation: `src/velvetoverride/resume/scorer.py` → `ATSScorer`.
+
+### 6. Activity Diversification (Anti-Pattern Detection)
+Between applications, the bot randomly performs non-application LinkedIn actions —
+scrolling the feed, checking notifications, or idle pauses. This breaks up the
+robotic "search → apply → search → apply" pattern that detection systems flag.
+
+Implementation: `src/velvetoverride/browser/stealth.py` → `diversify_activity()`.
+
+### 7. Tiered Field Resolution (5-Level Cascade)
+No other bot has this depth of resolution strategy:
+1. **Learned** (human-corrected answers from prior runs)
+2. **Config** (predetermined `answers.yaml`)
+3. **Profile** (personal info from `profile.yaml`)
+4. **EEO handler** (always decline/opt-out)
+5. **LLM** (Claude API — flagged for review)
+
+This minimizes API costs while maximizing accuracy.
+
+---
+
+## How to Run
+
+### Prerequisites
+
+- **Python 3.11+**
+- **Google Chrome** installed (the bot uses real Chrome, not Chromium)
+- **Anthropic API key** (for LLM features — optional but recommended)
+
+### Quick Start
+
+```bash
+# 1. Clone and install
+git clone <repo-url> && cd VelvetOverride
+pip install -e ".[dev]"
+
+# 2. Install Chrome browser for Patchright
+patchright install chrome
+
+# 3. Configure your credentials
+cp config/.env.example config/.env
+# Edit config/.env with your LinkedIn credentials and Anthropic API key
+
+# 4. Customize your profile
+# Edit config/profile.yaml with your real experience, skills, education
+# Edit config/answers.yaml to set your predetermined answers
+# Edit config/settings.yaml to set job search filters
+
+# 5. Run in dry-run mode first (fills forms but does NOT submit)
+velvetoverride run --dry-run
+
+# 6. When satisfied, run live
+velvetoverride run --live
+```
+
+### CLI Commands
+
+```bash
+velvetoverride run [--dry-run|--live] [-v]  # Run the application bot
+velvetoverride stats                         # Show application statistics
+velvetoverride export [--format csv|json]    # Export tracking data
+velvetoverride review                        # Show questions needing review
+velvetoverride tailor TITLE COMPANY JD_FILE  # Generate a tailored resume only
+```
+
+### Configuration Files
+
+| File | Purpose |
+|---|---|
+| `config/settings.yaml` | Bot behavior, search filters, browser config, LLM models, rate limits |
+| `config/profile.yaml` | Your resume data — experience, skills, education, personal info |
+| `config/answers.yaml` | Predetermined answers for known question types + learned answers |
+| `config/.env` | Secrets — LinkedIn credentials, Anthropic API key, proxy URL |
+
+### Where to Run
+
+**Option A: Local machine (recommended for getting started)**
+- Run on your desktop/laptop with Chrome installed
+- Browser opens visually so you can watch and intervene
+- Best for calibration and dry-run testing
+
+**Option B: Cloud VM with display**
+- Spin up a cloud VM (e.g., AWS EC2, GCP, DigitalOcean) with a desktop environment
+- Use VNC/RDP to observe the bot
+- Set `headless: false` in settings.yaml
+- Good for longer unattended sessions
+
+**Option C: Headless server (advanced)**
+- Run on a headless Linux server with `Xvfb` (virtual framebuffer)
+- `Xvfb :99 -screen 0 1920x1080x24 & export DISPLAY=:99`
+- Set `headless: false` (Patchright still needs a display context for stealth)
+- Best for scheduled/cron-based runs
+
+### Running Tests
+
+```bash
+pytest tests/ -v              # Run all tests
+pytest tests/ -v --cov        # Run with coverage
+```
+
+---
+
 ## Implementation Phases
 
-### Phase 1: Foundation
+All phases are **implemented**:
+
+### Phase 1: Foundation (DONE)
 - Project scaffolding (pyproject.toml, directory structure, config loaders)
 - Patchright browser engine setup with anti-detection config
-- LinkedIn authentication (login + session persistence)
+- LinkedIn authentication (login + session persistence + checkpoint handling)
 - SQLite tracking database schema and models
 
-### Phase 2: Job Discovery
-- Job search page navigation and filter application
-- Job listing scraper (title, company, description, URL, requirements)
-- Deduplication against tracking database
-- Job description storage and keyword extraction
+### Phase 2: Job Discovery (DONE)
+- Job search URL builder with full filter support
+- Job listing scraper (title, company, description, URL, location)
+- Deduplication (exact URL + fuzzy title matching)
+- Company and keyword blacklisting
 
-### Phase 3: Application Engine
-- Easy Apply form flow walker (multi-step form navigation)
-- Form field type detection (text, radio, dropdown, checkbox, upload, textarea)
-- Predetermined answer lookup from `answers.yaml`
-- Claude API integration for unknown field resolution
+### Phase 3: Application Engine (DONE)
+- Multi-step Easy Apply form walker
+- Form field type detection (7 types: text, numeric, radio, dropdown, checkbox, upload, textarea)
+- 5-tier hybrid field solver (learned → config → profile → EEO → LLM)
 - Resume upload handling
+- Per-step screenshot capture
 
-### Phase 4: Resume Tailoring
-- Master resume YAML schema design
-- Jinja2 LaTeX/HTML template creation
-- LLM-powered JD keyword extraction and bullet point ranking
+### Phase 4: Resume Tailoring (DONE)
+- Master resume YAML schema with skill-tagged bullet points
+- Jinja2 HTML template with ATS-friendly layout
+- LLM-powered JD keyword extraction and bullet ranking
 - Professional summary rewriting per role
-- ATS score self-evaluation
-- PDF generation pipeline
+- ATS self-scoring with coverage analysis
+- PDF generation via WeasyPrint
 
-### Phase 5: Polish & Safety
-- Dry-run mode (fill forms without submitting)
-- Human review queue and flagging system
-- CSV/JSON export for application tracking
-- Rate limiting and human-like timing tuning
-- Comprehensive logging and error recovery
-- Test suite for core components
+### Phase 5: Polish & Safety (DONE)
+- Dry-run mode (forms filled but not submitted)
+- Human review queue with flagging
+- CSV/JSON/review-queue export
+- Configurable rate limiting and human-like timing
+- Activity diversification between applications
+- Structured logging with structlog
+- 37-test suite covering config, field solver, resume, search, and tracking
 
 ---
 

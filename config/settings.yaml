@@ -1,0 +1,87 @@
+# ─── Bot Behavior ───────────────────────────────────────────────
+bot:
+  # Dry-run mode: fill forms but do NOT submit. Use for calibration.
+  dry_run: true
+  # Max applications per session (stay conservative to avoid detection)
+  max_applications: 25
+  # Seconds to wait between applications (random within range)
+  delay_min: 5
+  delay_max: 18
+  # Seconds to wait between form field interactions
+  field_delay_min: 1
+  field_delay_max: 4
+  # Capture a screenshot at each form step (for human review)
+  capture_screenshots: true
+  screenshots_dir: "screenshots"
+
+# ─── Job Search Filters ────────────────────────────────────────
+search:
+  keywords:
+    - "Software Engineer"
+    - "Backend Engineer"
+  locations:
+    - "United States"
+  # Filter to Easy Apply only
+  easy_apply_only: true
+  # Experience levels: internship, entry_level, associate, mid_senior, director, executive
+  experience_levels:
+    - "entry_level"
+    - "associate"
+    - "mid_senior"
+  # Date posted: any, past_month, past_week, past_24h
+  date_posted: "past_week"
+  # Remote filter: on_site, remote, hybrid
+  remote:
+    - "remote"
+    - "hybrid"
+  # Job types: full_time, part_time, contract, temporary, internship
+  job_types:
+    - "full_time"
+  # Words in JD that trigger automatic skip
+  blacklist_keywords:
+    - "clearance required"
+    - "polygraph"
+  # Companies to skip
+  blacklist_companies:
+    - "Revature"
+  # Minimum job match score (0-100) to proceed with application
+  min_match_score: 40
+
+# ─── Browser Configuration ─────────────────────────────────────
+browser:
+  # Use real Chrome (not Chromium) for better stealth
+  channel: "chrome"
+  headless: false
+  # Persistent user data directory (reuse sessions / cookies)
+  user_data_dir: "browser_data"
+  # Viewport (null = use real window size, which is stealthier)
+  viewport: null
+  # Slow-mo milliseconds added to every action (adds human feel)
+  slow_mo: 50
+
+# ─── LLM Configuration ─────────────────────────────────────────
+llm:
+  # Model for fast field Q&A (cheaper, faster)
+  field_model: "claude-sonnet-4-6"
+  # Model for resume tailoring and complex reasoning
+  resume_model: "claude-sonnet-4-6"
+  # Max tokens for field answers
+  field_max_tokens: 300
+  # Max tokens for resume tailoring
+  resume_max_tokens: 4096
+
+# ─── Resume Configuration ──────────────────────────────────────
+resume:
+  # Template to use (filename without extension in src/velvetoverride/resume/templates/)
+  template: "default"
+  # Output format: "html" (weasyprint) or "latex" (pdflatex)
+  output_format: "html"
+  # Target ATS keyword coverage (0.0 - 1.0)
+  target_keyword_coverage: 0.70
+
+# ─── Tracking / Database ───────────────────────────────────────
+tracking:
+  database_path: "data/applications.db"
+  # Export format: csv, json, or both
+  export_format: "both"
+  export_path: "data/"

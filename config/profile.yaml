@@ -1,0 +1,100 @@
+# ─── Personal Information ───────────────────────────────────────
+personal:
+  first_name: "Jane"
+  last_name: "Doe"
+  email: "jane.doe@example.com"
+  phone: "+1 555-123-4567"
+  phone_country_code: "United States (+1)"
+  linkedin_url: "https://www.linkedin.com/in/janedoe"
+  website: "https://janedoe.dev"
+  github: "https://github.com/janedoe"
+  city: "San Francisco, CA"
+  state: "California"
+  country: "United States"
+  willing_to_relocate: true
+
+# ─── Professional Summary (default — will be rewritten per job) ─
+summary: >
+  Software engineer with 5 years of experience building scalable
+  distributed systems and REST APIs. Proficient in Python, Go, and
+  TypeScript. Passionate about clean architecture, developer tooling,
+  and shipping reliable software.
+
+# ─── Work Experience ───────────────────────────────────────────
+experience:
+  - company: "Acme Corp"
+    title: "Senior Software Engineer"
+    start_date: "2022-03"
+    end_date: "present"
+    location: "San Francisco, CA"
+    bullets:
+      - text: "Designed and built a real-time event processing pipeline handling 50K events/sec using Python, Kafka, and Flink"
+        skills: ["python", "kafka", "flink", "distributed systems", "event-driven architecture"]
+      - text: "Led migration from monolithic REST API to microservices architecture, reducing p99 latency by 40%"
+        skills: ["microservices", "rest api", "system design", "architecture"]
+      - text: "Mentored 4 junior engineers through code reviews and pair programming, improving team velocity by 25%"
+        skills: ["mentoring", "leadership", "code review"]
+
+  - company: "StartupXYZ"
+    title: "Software Engineer"
+    start_date: "2020-01"
+    end_date: "2022-02"
+    location: "Remote"
+    bullets:
+      - text: "Built customer-facing dashboard with React and TypeScript serving 10K daily active users"
+        skills: ["react", "typescript", "frontend", "dashboard"]
+      - text: "Implemented CI/CD pipeline with GitHub Actions reducing deploy time from 45 min to 8 min"
+        skills: ["ci/cd", "github actions", "devops", "automation"]
+      - text: "Developed RESTful APIs in Go with PostgreSQL, handling 5M requests/day with 99.9% uptime"
+        skills: ["go", "postgresql", "rest api", "backend", "reliability"]
+
+  - company: "TechCo"
+    title: "Junior Developer"
+    start_date: "2018-06"
+    end_date: "2019-12"
+    location: "New York, NY"
+    bullets:
+      - text: "Contributed to Python backend services processing financial data for compliance reporting"
+        skills: ["python", "backend", "data processing", "financial"]
+      - text: "Wrote comprehensive test suites achieving 90% code coverage across 3 microservices"
+        skills: ["testing", "pytest", "test automation", "quality assurance"]
+
+# ─── Education ─────────────────────────────────────────────────
+education:
+  - institution: "University of California, Berkeley"
+    degree: "Bachelor of Science"
+    field: "Computer Science"
+    graduation_date: "2018-05"
+    gpa: "3.7"
+
+# ─── Skills ────────────────────────────────────────────────────
+skills:
+  languages: ["Python", "Go", "TypeScript", "JavaScript", "SQL", "Bash"]
+  frameworks: ["React", "FastAPI", "Django", "Flask", "Next.js"]
+  infrastructure: ["AWS", "Docker", "Kubernetes", "Terraform", "GitHub Actions"]
+  databases: ["PostgreSQL", "Redis", "MongoDB", "DynamoDB", "Kafka"]
+  practices: ["Microservices", "REST APIs", "CI/CD", "TDD", "Agile"]
+
+# ─── Certifications ────────────────────────────────────────────
+certifications:
+  - name: "AWS Solutions Architect Associate"
+    date: "2023-06"
+
+# ─── Years of experience per technology (for numeric form fields) ─
+technology_experience:
+  python: 5
+  go: 3
+  typescript: 3
+  javascript: 4
+  react: 3
+  sql: 5
+  aws: 3
+  docker: 4
+  kubernetes: 2
+  postgresql: 4
+  redis: 3
+  kafka: 2
+  terraform: 2
+  ci/cd: 4
+  git: 6
+  default: 1

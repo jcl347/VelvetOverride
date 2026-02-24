@@ -1,0 +1,42 @@
+# Secrets
+.env
+config/.env
+
+# Generated data
+data/applications.db
+data/resumes/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Browser data
+browser_data/
+user_data_dir/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Screenshots
+screenshots/
+
+# Logs
+*.log
+logs/
