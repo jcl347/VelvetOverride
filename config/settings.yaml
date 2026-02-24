@@ -47,6 +47,24 @@ search:
   # Minimum job match score (0-100) to proceed with application
   min_match_score: 40
 
+# ─── Salary Filtering ─────────────────────────────────────────
+# Filter jobs by extracted salary range. Jobs without salary info
+# are included by default (benefit of the doubt).
+salary:
+  # Minimum annual salary to consider (null = no minimum)
+  min_annual: null    # e.g. 100000
+  # Maximum annual salary to consider (null = no maximum)
+  max_annual: null    # e.g. 250000
+
+# ─── CAPTCHA Handling ─────────────────────────────────────────
+# Strategy: "manual" (default), "2captcha", or "capsolver"
+captcha:
+  strategy: "manual"
+  # API key for 2captcha or capsolver (also reads CAPTCHA_API_KEY env var)
+  api_key: null
+  # Timeout in seconds to wait for CAPTCHA resolution
+  timeout: 300
+
 # ─── Browser Configuration ─────────────────────────────────────
 browser:
   # Use real Chrome (not Chromium) for better stealth

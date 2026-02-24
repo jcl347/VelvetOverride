@@ -28,7 +28,10 @@ CREATE TABLE IF NOT EXISTS applications (
     match_score REAL DEFAULT 0.0,
     applied_at TEXT NOT NULL,
     notes TEXT DEFAULT '',
-    screenshot_path TEXT DEFAULT ''
+    screenshot_path TEXT DEFAULT '',
+    salary_min INTEGER DEFAULT NULL,
+    salary_max INTEGER DEFAULT NULL,
+    salary_raw TEXT DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS questions (
@@ -87,8 +90,9 @@ class TrackingDB:
         cursor = self.conn.execute(
             """INSERT INTO applications
                (job_url, job_title, company, location, job_description,
-                status, resume_version, match_score, applied_at, notes, screenshot_path)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                status, resume_version, match_score, applied_at, notes, screenshot_path,
+                salary_min, salary_max, salary_raw)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 record.job_url,
                 record.job_title,
@@ -101,6 +105,9 @@ class TrackingDB:
                 record.applied_at,
                 record.notes,
                 record.screenshot_path,
+                record.salary_min,
+                record.salary_max,
+                record.salary_raw,
             ),
         )
         app_id = cursor.lastrowid
@@ -164,6 +171,9 @@ class TrackingDB:
                     applied_at=row["applied_at"],
                     notes=row["notes"],
                     screenshot_path=row["screenshot_path"],
+                    salary_min=row["salary_min"],
+                    salary_max=row["salary_max"],
+                    salary_raw=row["salary_raw"],
                     questions=questions,
                 )
             )

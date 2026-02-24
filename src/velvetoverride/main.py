@@ -15,7 +15,13 @@ from velvetoverride.utils.logging import get_logger, setup_logging
 log = get_logger(__name__)
 
 
-async def run_bot(config_dir: str | None = None, dry_run: bool | None = None) -> None:
+async def run_bot(
+    config_dir: str | None = None,
+    dry_run: bool | None = None,
+    max_apps_override: int | None = None,
+    min_salary: int | None = None,
+    max_salary: int | None = None,
+) -> None:
     """Main bot orchestration loop."""
     config = load_config(Path(config_dir) if config_dir else None)
 
@@ -23,12 +29,19 @@ async def run_bot(config_dir: str | None = None, dry_run: bool | None = None) ->
         config.settings.setdefault("bot", {})["dry_run"] = dry_run
 
     is_dry_run = config.bot.get("dry_run", True)
-    max_apps = config.bot.get("max_applications", 25)
+    max_apps = max_apps_override or config.bot.get("max_applications", 25)
+
+    # Salary filter: CLI overrides take precedence, then settings.yaml
+    salary_cfg = config.settings.get("salary", {})
+    effective_min_salary = min_salary or salary_cfg.get("min_annual")
+    effective_max_salary = max_salary or salary_cfg.get("max_annual")
 
     log.info(
         "bot.starting",
         dry_run=is_dry_run,
         max_applications=max_apps,
+        min_salary=effective_min_salary,
+        max_salary=effective_max_salary,
         keywords=config.search.get("keywords", []),
     )
 
@@ -36,6 +49,8 @@ async def run_bot(config_dir: str | None = None, dry_run: bool | None = None) ->
     from velvetoverride.agent.field_solver import FieldSolver
     from velvetoverride.agent.llm import LLMClient
     from velvetoverride.agent.resume_tailor import ResumeTailor
+    from velvetoverride.agent.salary import extract_salary, salary_in_range
+    from velvetoverride.browser.captcha import detect_captcha, handle_captcha
     from velvetoverride.browser.engine import BrowserEngine
     from velvetoverride.browser.stealth import diversify_activity, random_delay
     from velvetoverride.linkedin.apply import ApplicationFlow
@@ -80,6 +95,13 @@ async def run_bot(config_dir: str | None = None, dry_run: bool | None = None) ->
             log.error("bot.login_failed")
             return
 
+        # ── Check for CAPTCHA after login ──
+        if await detect_captcha(page):
+            log.warning("bot.captcha_after_login")
+            if not await handle_captcha(page, config):
+                log.error("bot.captcha_unresolved")
+                return
+
         # ── Search for jobs ──
         listings = await scrape_job_listings(page, config)
         log.info("bot.listings_found", count=len(listings))
@@ -95,6 +117,42 @@ async def run_bot(config_dir: str | None = None, dry_run: bool | None = None) ->
             listings = [l for l in listings if l.match_score >= min_score]
             listings.sort(key=lambda l: l.match_score, reverse=True)
             log.info("bot.after_scoring", remaining=len(listings))
+
+        # ── Extract salary ranges and filter ──
+        if effective_min_salary or effective_max_salary:
+            pre_filter = len(listings)
+            filtered = []
+            for listing in listings:
+                salary = extract_salary(listing.description)
+                if salary:
+                    listing.salary_min = salary.annual_min
+                    listing.salary_max = salary.annual_max
+                    listing.salary_raw = salary.raw_text
+                if salary_in_range(salary, effective_min_salary, effective_max_salary):
+                    filtered.append(listing)
+                else:
+                    log.info(
+                        "bot.salary_filtered",
+                        title=listing.title,
+                        company=listing.company,
+                        salary=str(salary) if salary else "unknown",
+                    )
+            listings = filtered
+            log.info(
+                "bot.after_salary_filter",
+                before=pre_filter,
+                after=len(listings),
+                min_salary=effective_min_salary,
+                max_salary=effective_max_salary,
+            )
+        else:
+            # Still extract salary info for tracking even without filtering
+            for listing in listings:
+                salary = extract_salary(listing.description)
+                if salary:
+                    listing.salary_min = salary.annual_min
+                    listing.salary_max = salary.annual_max
+                    listing.salary_raw = salary.raw_text
 
         # ── Apply to each listing ──
         app_flow = ApplicationFlow(page, config, field_solver, db)
@@ -147,6 +205,9 @@ async def run_bot(config_dir: str | None = None, dry_run: bool | None = None) ->
             record = await app_flow.apply_to_job(listing, resume_path)
             if resume_path:
                 record.resume_version = resume_path
+            record.salary_min = listing.salary_min
+            record.salary_max = listing.salary_max
+            record.salary_raw = listing.salary_raw
             db.save_application(record)
             applied_count += 1
 
@@ -224,10 +285,13 @@ def cli(ctx, config_dir, verbose, json_log):
 
 @cli.command()
 @click.option("--dry-run/--live", default=None, help="Override dry_run setting")
+@click.option("--max-apps", type=int, default=None, help="Max applications this run (overrides settings.yaml)")
+@click.option("--min-salary", type=int, default=None, help="Minimum annual salary filter (e.g. 100000)")
+@click.option("--max-salary", type=int, default=None, help="Maximum annual salary filter (e.g. 200000)")
 @click.pass_context
-def run(ctx, dry_run):
+def run(ctx, dry_run, max_apps, min_salary, max_salary):
     """Run the full application bot pipeline."""
-    asyncio.run(run_bot(ctx.obj["config_dir"], dry_run))
+    asyncio.run(run_bot(ctx.obj["config_dir"], dry_run, max_apps, min_salary, max_salary))
 
 
 @cli.command()

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from velvetoverride.browser.captcha import detect_captcha, handle_captcha
 from velvetoverride.browser.stealth import human_type, random_delay
 from velvetoverride.utils.logging import get_logger
 
@@ -69,19 +70,14 @@ async def login(page: Page, config: Config) -> bool:
     await random_delay(3.0, 6.0)
 
     # Check for security checkpoint (CAPTCHA, verification)
-    current_url = page.url
-    if "checkpoint" in current_url or "challenge" in current_url:
-        log.warning(
-            "auth.security_checkpoint",
-            url=current_url,
-            msg="Manual intervention required — solve the CAPTCHA in the browser window.",
-        )
-        # Wait up to 120 seconds for human to solve checkpoint
-        try:
-            await page.wait_for_url("**/feed/**", timeout=120000)
-        except Exception:
-            log.error("auth.checkpoint_timeout")
+    if await detect_captcha(page):
+        log.warning("auth.security_checkpoint", url=page.url)
+        resolved = await handle_captcha(page, config)
+        if not resolved:
+            log.error("auth.checkpoint_unresolved")
             return False
+        # After CAPTCHA resolution, wait briefly for redirect
+        await random_delay(2.0, 4.0)
 
     # Verify we landed on feed
     if "/feed" in page.url:

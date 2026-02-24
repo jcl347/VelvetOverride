@@ -15,6 +15,9 @@ and tracks every application in a local SQLite database for human review.
 - **Job match scoring** — applies to best-fit jobs first by scoring JDs against your skill profile
 - **Fuzzy duplicate detection** — catches reposted jobs with slightly different titles
 - **Anti-detection** — Patchright (undetected Playwright), persistent Chrome sessions, human-like timing, activity diversification
+- **Salary range extraction** — regex-based salary parsing from job descriptions with annual/hourly normalization
+- **Salary band filtering** — only apply to jobs within your target compensation range (CLI or config)
+- **CAPTCHA handling** — 3 strategies: manual (VNC), 2Captcha API, CapSolver API
 - **Dry-run mode** — fills forms without submitting for safe calibration
 - **Full tracking** — SQLite database with CSV/JSON export and a human review queue
 
@@ -40,11 +43,30 @@ velvetoverride run --live       # Submit applications
 ## CLI Commands
 
 ```
-velvetoverride run [--dry-run|--live] [-v]   Run the application bot
+velvetoverride run [OPTIONS]                  Run the application bot
+  --dry-run / --live                          Override dry_run setting
+  --max-apps N                                Max applications this run (overrides settings.yaml)
+  --min-salary N                              Minimum annual salary filter (e.g. 100000)
+  --max-salary N                              Maximum annual salary filter (e.g. 200000)
+  -v                                          Verbose/debug logging
+
 velvetoverride stats                          Show application statistics
 velvetoverride export [--format csv|json]     Export tracking data
 velvetoverride review                         Show LLM-answered questions needing review
 velvetoverride tailor TITLE COMPANY JD_FILE   Generate a tailored resume (no apply)
+```
+
+### Examples
+
+```bash
+# Apply to max 10 jobs paying $120K-$200K
+velvetoverride run --live --max-apps 10 --min-salary 120000 --max-salary 200000
+
+# Dry-run with salary filter from settings.yaml
+velvetoverride run --dry-run
+
+# Quick 5-application test run
+velvetoverride run --live --max-apps 5 -v
 ```
 
 ---
@@ -152,7 +174,7 @@ nano config/settings.yaml     # Target job roles, locations, filters
 
 ```bash
 pytest tests/ -v
-# All 37 tests should pass
+# All 57 tests should pass
 ```
 
 ---
@@ -454,6 +476,11 @@ journalctl -u velvetoverride.service -f
 | `search.blacklist_companies` | Companies to skip |
 | `search.blacklist_keywords` | JD keywords that trigger skip |
 | `search.min_match_score` | Minimum job-profile match score (0-100) |
+| `salary.min_annual` | Minimum annual salary to apply (null = no minimum) |
+| `salary.max_annual` | Maximum annual salary to apply (null = no maximum) |
+| `captcha.strategy` | CAPTCHA strategy: `manual`, `2captcha`, or `capsolver` |
+| `captcha.api_key` | API key for 2Captcha/CapSolver (also reads `CAPTCHA_API_KEY` env var) |
+| `captcha.timeout` | Seconds to wait for CAPTCHA resolution (default: 300) |
 | `browser.channel` | `chrome` (real Chrome — stealthier) |
 | `browser.headless` | `false` for VNC/desktop; Xvfb handles "headless" |
 | `llm.field_model` | Claude model for field Q&A (default: claude-sonnet-4-6) |
@@ -508,7 +535,7 @@ To minimize costs:
 | `patchright install chrome` fails | Install Chrome manually first: `wget` + `dpkg` (see above) |
 | WeasyPrint import error | Install system deps: `apt install libpango-1.0-0 libharfbuzz0b libpangoft2-1.0-0 libharfbuzz-subset0` |
 | "Looks like you launched a headed browser without having a XServer running" | Start Xvfb: `Xvfb :99 -screen 0 1920x1080x24 & export DISPLAY=:99` |
-| LinkedIn security checkpoint / CAPTCHA | The bot waits 120s for you to solve it manually. Use VNC to intervene, or run `--dry-run` first to establish a session. |
+| LinkedIn security checkpoint / CAPTCHA | Set `captcha.strategy` in settings.yaml. `manual` (default) waits for you to solve via VNC. `2captcha` or `capsolver` auto-solve via API. Set `CAPTCHA_API_KEY` in `.env` for API strategies. |
 | `ANTHROPIC_API_KEY` not set | Add it to `config/.env`. The bot works without it but can't handle unknown questions or tailor resumes. |
 | Chrome crashes with `--no-sandbox` error | Run as non-root user, or add `--no-sandbox` to browser args in `engine.py` |
 | VNC black screen | Restart VNC: `vncserver -kill :1 && vncserver -geometry 1920x1080 -depth 24 :1` |

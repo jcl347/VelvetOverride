@@ -144,7 +144,8 @@ VelvetOverride/
 │       ├── main.py              # CLI entry point (click) / orchestrator / bot loop
 │       ├── browser/
 │       │   ├── engine.py        # Patchright browser launch & lifecycle
-│       │   └── stealth.py       # Human-like behavior (typing, scrolling, diversification)
+│       │   ├── stealth.py       # Human-like behavior (typing, scrolling, diversification)
+│       │   └── captcha.py       # CAPTCHA detection + 3-strategy resolver (manual/2captcha/capsolver)
 │       ├── linkedin/
 │       │   ├── auth.py          # Login, session reuse, checkpoint handling
 │       │   ├── search.py        # Job search URL builder, listing scraper, filters
@@ -153,7 +154,8 @@ VelvetOverride/
 │       ├── agent/
 │       │   ├── llm.py           # Claude API client (Q&A, keyword extraction, tailoring)
 │       │   ├── field_solver.py  # 5-tier hybrid solver (learned→config→profile→EEO→LLM)
-│       │   └── resume_tailor.py # JD analysis → bullet ranking → summary rewrite → PDF
+│       │   ├── resume_tailor.py # JD analysis → bullet ranking → summary rewrite → PDF
+│       │   └── salary.py        # Salary range extraction (regex) + filtering
 │       ├── resume/
 │       │   ├── builder.py       # Jinja2 → HTML → PDF (WeasyPrint) pipeline
 │       │   ├── scorer.py        # ATS keyword coverage scoring & suggestions
@@ -170,6 +172,7 @@ VelvetOverride/
 │   ├── test_config.py           # Config loading (3 tests)
 │   ├── test_field_solver.py     # Hybrid field solver (18 tests)
 │   ├── test_resume.py           # Resume builder + ATS scorer (7 tests)
+│   ├── test_salary.py           # Salary extraction + filtering (20 tests)
 │   ├── test_search.py           # Search URL builder (6 tests)
 │   └── test_tracking.py         # SQLite database (6 tests)
 └── data/                        # (gitignored)
@@ -183,8 +186,10 @@ VelvetOverride/
 1. CONFIGURE → Load profile.yaml, answers.yaml, settings.yaml
 2. LAUNCH    → Start Patchright persistent browser context (real Chrome)
 3. LOGIN     → Authenticate to LinkedIn (session cookie reuse when possible)
-4. SEARCH    → Navigate to Jobs, apply filters (role, location, Easy Apply, etc.)
-5. ITERATE   → For each job listing:
+4. CAPTCHA   → Detect + resolve any post-login CAPTCHA (manual/2captcha/capsolver)
+5. SEARCH    → Navigate to Jobs, apply filters (role, location, Easy Apply, etc.)
+6. SALARY    → Extract salary ranges from JDs, filter by configured salary band
+7. ITERATE   → For each job listing:
    a. SCRAPE   → Extract job title, company, description, requirements
    b. CHECK    → Deduplicate against tracking DB
    c. TAILOR   → Generate role-specific resume via LLM + Jinja2 pipeline
@@ -194,9 +199,9 @@ VelvetOverride/
       iii. If no config match → invoke Claude API for contextual answer
       iv.  Upload tailored resume PDF
       v.   Flag LLM-generated answers for human review
-   e. TRACK    → Record application details in SQLite
+   e. TRACK    → Record application details + salary data in SQLite
    f. DELAY    → Human-like pause before next application
-6. EXPORT   → Generate CSV/JSON report of all applications for review
+8. EXPORT   → Generate CSV/JSON report of all applications for review
 ```
 
 ### Technology Stack
@@ -308,6 +313,35 @@ No other bot has this depth of resolution strategy:
 
 This minimizes API costs while maximizing accuracy.
 
+### 8. Salary Range Extraction & Band Filtering
+The bot extracts salary information from job descriptions using regex patterns that
+handle multiple formats: `$120,000-$180,000`, `$120K-$150K`, `$55/hr-$75/hr`, and
+contextual salary keywords. Hourly rates are automatically annualized (×2,080 hours).
+Users configure a target salary band via `--min-salary`/`--max-salary` CLI flags or
+`salary.min_annual`/`salary.max_annual` in settings.yaml. Jobs without salary info
+are included by default (benefit of the doubt). Salary data is tracked in SQLite
+for post-run analysis.
+
+Implementation: `src/velvetoverride/agent/salary.py` → `extract_salary()`,
+`salary_in_range()`, `SalaryRange` dataclass. Wired into `main.py` apply loop.
+
+### 9. Multi-Strategy CAPTCHA Resolution
+Three configurable strategies for handling LinkedIn security checkpoints:
+1. **Manual** (default) — Pauses and polls every 5s for up to 300s, waiting for
+   human intervention via VNC/desktop. Emits periodic log reminders.
+2. **2Captcha API** — Submits reCAPTCHA sitekey to 2Captcha's human-powered solving
+   network (~$1-3 per 1,000 solves). Polls for solution, injects token, triggers callback.
+3. **CapSolver API** — AI-powered solving, typically faster (~$0.80-3 per 1,000 solves).
+   Same workflow: submit task → poll → inject token.
+
+All strategies fall back to manual if the API solve fails. CAPTCHA detection checks
+both URL indicators (`checkpoint`, `challenge`, `captcha`, `security-verification`)
+and page elements (iframes, containers, data attributes).
+
+Implementation: `src/velvetoverride/browser/captcha.py` → `detect_captcha()`,
+`handle_captcha()`. Integrated into `linkedin/auth.py` login flow and `main.py`
+post-login check.
+
 ---
 
 ## How to Run
@@ -347,7 +381,10 @@ velvetoverride run --live
 ### CLI Commands
 
 ```bash
-velvetoverride run [--dry-run|--live] [-v]  # Run the application bot
+velvetoverride run [--dry-run|--live] [-v]   # Run the application bot
+  --max-apps N                               # Max applications this run
+  --min-salary N                             # Minimum annual salary (e.g. 100000)
+  --max-salary N                             # Maximum annual salary (e.g. 200000)
 velvetoverride stats                         # Show application statistics
 velvetoverride export [--format csv|json]    # Export tracking data
 velvetoverride review                        # Show questions needing review
@@ -429,7 +466,15 @@ All phases are **implemented**:
 - Configurable rate limiting and human-like timing
 - Activity diversification between applications
 - Structured logging with structlog
-- 37-test suite covering config, field solver, resume, search, and tracking
+
+### Phase 6: Salary Filtering & CAPTCHA Handling (DONE)
+- Salary range extraction from job descriptions (regex, annual/hourly, multiple formats)
+- Salary band filtering via CLI (`--min-salary`/`--max-salary`) and settings.yaml
+- Salary data tracked in SQLite (salary_min, salary_max, salary_raw columns)
+- CAPTCHA detection and 3-strategy resolution (manual, 2Captcha API, CapSolver API)
+- CAPTCHA integration into login flow and post-login verification
+- CLI `--max-apps` flag to control application count per run
+- 57-test suite covering config, field solver, resume, salary, search, and tracking
 
 ---
 

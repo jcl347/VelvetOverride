@@ -54,6 +54,9 @@ class ApplicationRecord:
     applied_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
     notes: str = ""
     screenshot_path: str = ""
+    salary_min: int | None = None
+    salary_max: int | None = None
+    salary_raw: str = ""
     questions: list[QuestionRecord] = field(default_factory=list)
     id: int | None = None
 
@@ -70,4 +73,7 @@ class JobListing:
     posted_date: str = ""
     easy_apply: bool = True
     match_score: float = 0.0
+    salary_min: int | None = None
+    salary_max: int | None = None
+    salary_raw: str = ""
     skills_extracted: list[str] = field(default_factory=list)
