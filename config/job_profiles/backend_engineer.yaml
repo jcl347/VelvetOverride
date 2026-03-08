@@ -1,0 +1,56 @@
+# ─── Job Profile: Backend Engineer ────────────────────────────────
+# Overrides settings.yaml and profile.yaml for backend engineering roles.
+# Only include fields you want to override — everything else inherits
+# from the base settings.yaml, profile.yaml, and answers.yaml.
+
+name: "Backend Engineer"
+description: "Backend/server-side engineering roles (Python, Go, APIs, distributed systems)"
+
+# ─── Search filter overrides ─────────────────────────────────────
+search:
+  keywords:
+    - "Backend Engineer"
+    - "Backend Developer"
+    - "Server Engineer"
+    - "Platform Engineer"
+  experience_levels:
+    - "mid_senior"
+    - "associate"
+
+# ─── Salary overrides ───────────────────────────────────────────
+salary:
+  min_annual: 140000
+  max_annual: null
+
+# ─── Profile overrides ──────────────────────────────────────────
+# Override the professional summary to emphasize backend strengths
+summary: >
+  Backend engineer with 5 years of experience designing and building
+  scalable distributed systems, REST/gRPC APIs, and event-driven
+  architectures. Proficient in Python, Go, and SQL. Strong track record
+  of improving system reliability and reducing latency in production
+  environments.
+
+# ─── Skill emphasis (for job match scoring) ──────────────────────
+# These skills are used to score job listings — higher weight means
+# listings mentioning these skills rank higher.
+skill_emphasis:
+  - "python"
+  - "go"
+  - "distributed systems"
+  - "microservices"
+  - "rest api"
+  - "grpc"
+  - "kafka"
+  - "postgresql"
+  - "redis"
+  - "docker"
+  - "kubernetes"
+  - "aws"
+
+# ─── Answer overrides ───────────────────────────────────────────
+# Override specific answer defaults for this job type
+answers:
+  numeric:
+    salary:
+      answer: "160000"

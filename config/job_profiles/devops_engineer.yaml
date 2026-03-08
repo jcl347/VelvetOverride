@@ -1,0 +1,49 @@
+# ─── Job Profile: DevOps / Infrastructure Engineer ──────────────
+# Overrides for DevOps, SRE, and infrastructure engineering roles.
+
+name: "DevOps Engineer"
+description: "DevOps, SRE, and infrastructure engineering roles (AWS, K8s, CI/CD)"
+
+# ─── Search filter overrides ─────────────────────────────────────
+search:
+  keywords:
+    - "DevOps Engineer"
+    - "Site Reliability Engineer"
+    - "Infrastructure Engineer"
+    - "Platform Engineer"
+    - "Cloud Engineer"
+  experience_levels:
+    - "mid_senior"
+    - "associate"
+
+# ─── Salary overrides ───────────────────────────────────────────
+salary:
+  min_annual: 140000
+  max_annual: null
+
+# ─── Profile overrides ──────────────────────────────────────────
+summary: >
+  Infrastructure engineer with strong experience in AWS, Kubernetes,
+  Terraform, and CI/CD pipelines. Skilled at building reliable,
+  scalable deployment systems and improving developer productivity
+  through automation and observability tooling.
+
+# ─── Skill emphasis ─────────────────────────────────────────────
+skill_emphasis:
+  - "aws"
+  - "kubernetes"
+  - "docker"
+  - "terraform"
+  - "ci/cd"
+  - "github actions"
+  - "linux"
+  - "monitoring"
+  - "infrastructure"
+  - "devops"
+  - "sre"
+
+# ─── Answer overrides ───────────────────────────────────────────
+answers:
+  numeric:
+    salary:
+      answer: "155000"

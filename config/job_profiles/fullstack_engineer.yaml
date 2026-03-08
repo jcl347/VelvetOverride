@@ -1,0 +1,47 @@
+# ─── Job Profile: Full-Stack Engineer ────────────────────────────
+# Overrides for full-stack engineering roles.
+
+name: "Full-Stack Engineer"
+description: "Full-stack roles spanning frontend and backend (React, Python, APIs)"
+
+# ─── Search filter overrides ─────────────────────────────────────
+search:
+  keywords:
+    - "Full Stack Engineer"
+    - "Fullstack Developer"
+    - "Software Engineer"
+  experience_levels:
+    - "mid_senior"
+    - "associate"
+
+# ─── Salary overrides ───────────────────────────────────────────
+salary:
+  min_annual: 130000
+  max_annual: null
+
+# ─── Profile overrides ──────────────────────────────────────────
+summary: >
+  Full-stack engineer with 5 years of experience across the entire web
+  stack. Equally comfortable building React frontends and designing
+  scalable backend services in Python and Go. Experienced with cloud
+  infrastructure, CI/CD, and delivering end-to-end features from concept
+  to production.
+
+# ─── Skill emphasis ─────────────────────────────────────────────
+skill_emphasis:
+  - "react"
+  - "typescript"
+  - "python"
+  - "go"
+  - "rest api"
+  - "postgresql"
+  - "docker"
+  - "aws"
+  - "ci/cd"
+  - "full stack"
+
+# ─── Answer overrides ───────────────────────────────────────────
+answers:
+  numeric:
+    salary:
+      answer: "150000"

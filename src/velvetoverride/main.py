@@ -11,7 +11,7 @@ from pathlib import Path
 import click
 import yaml
 
-from velvetoverride.utils.config import load_config
+from velvetoverride.utils.config import list_job_profiles, load_config
 from velvetoverride.utils.logging import get_logger, setup_logging
 
 log = get_logger(__name__)
@@ -23,9 +23,13 @@ async def run_bot(
     max_apps_override: int | None = None,
     min_salary: int | None = None,
     max_salary: int | None = None,
+    job_profile: str | None = None,
 ) -> None:
     """Main bot orchestration loop."""
-    config = load_config(Path(config_dir) if config_dir else None)
+    config = load_config(
+        Path(config_dir) if config_dir else None,
+        job_profile=job_profile,
+    )
 
     if dry_run is not None:
         config.settings.setdefault("bot", {})["dry_run"] = dry_run
@@ -45,6 +49,7 @@ async def run_bot(
         min_salary=effective_min_salary,
         max_salary=effective_max_salary,
         keywords=config.search.get("keywords", []),
+        job_profile=config.active_job_profile,
     )
 
     # Late imports to avoid loading heavy deps at CLI parse time
@@ -72,6 +77,7 @@ async def run_bot(
         "dry_run": is_dry_run,
         "keywords": config.search.get("keywords", []),
         "location": config.search.get("location", ""),
+        "job_profile": config.active_job_profile,
     }, default=str)
     run_id = db.start_run(
         dry_run=is_dry_run,
@@ -341,8 +347,15 @@ def _find_default_resume(config) -> str | None:
 
 
 def _score_listings(listings, config, llm):
-    """Score listings by job match quality using keyword overlap."""
+    """Score listings by job match quality using keyword overlap.
+
+    When a job profile with skill_emphasis is active, emphasized skills
+    are weighted 3x higher than general skills, so jobs matching the
+    profile's target skills rank significantly higher.
+    """
     profile = config.profile
+    emphasis = [s.lower() for s in config.skill_emphasis]
+
     all_skills = []
     for cat_skills in profile.get("skills", {}).values():
         if isinstance(cat_skills, list):
@@ -359,9 +372,19 @@ def _score_listings(listings, config, llm):
             continue
 
         desc_lower = listing.description.lower()
-        matched = sum(1 for s in all_skills if s.lower() in desc_lower)
-        total = len(all_skills) if all_skills else 1
-        listing.match_score = min((matched / total) * 200, 100)
+
+        if emphasis:
+            # Weighted scoring: emphasized skills count 3x
+            emphasis_matched = sum(1 for s in emphasis if s in desc_lower)
+            general_only = [s for s in all_skills if s not in emphasis]
+            general_matched = sum(1 for s in general_only if s in desc_lower)
+            weighted = emphasis_matched * 3 + general_matched
+            total = len(emphasis) * 3 + len(general_only) if (emphasis or general_only) else 1
+            listing.match_score = min((weighted / total) * 200, 100)
+        else:
+            matched = sum(1 for s in all_skills if s in desc_lower)
+            total = len(all_skills) if all_skills else 1
+            listing.match_score = min((matched / total) * 200, 100)
 
     return listings
 
@@ -383,10 +406,11 @@ def cli(ctx, config_dir, verbose, json_log):
 @click.option("--max-apps", type=int, default=None, help="Max applications this run (overrides settings.yaml)")
 @click.option("--min-salary", type=int, default=None, help="Minimum annual salary filter (e.g. 100000)")
 @click.option("--max-salary", type=int, default=None, help="Maximum annual salary filter (e.g. 200000)")
+@click.option("--profile", "job_profile", default=None, help="Job profile to use (e.g. backend_engineer, frontend_engineer)")
 @click.pass_context
-def run(ctx, dry_run, max_apps, min_salary, max_salary):
+def run(ctx, dry_run, max_apps, min_salary, max_salary, job_profile):
     """Run the full application bot pipeline."""
-    asyncio.run(run_bot(ctx.obj["config_dir"], dry_run, max_apps, min_salary, max_salary))
+    asyncio.run(run_bot(ctx.obj["config_dir"], dry_run, max_apps, min_salary, max_salary, job_profile))
 
 
 @cli.command()
@@ -588,10 +612,14 @@ def _persist_learned_answers(config, field_solver) -> None:
 @click.argument("job_title")
 @click.argument("company")
 @click.argument("job_description_file", type=click.Path(exists=True))
+@click.option("--profile", "job_profile", default=None, help="Job profile to use (e.g. backend_engineer)")
 @click.pass_context
-def tailor(ctx, job_title, company, job_description_file):
+def tailor(ctx, job_title, company, job_description_file, job_profile):
     """Generate a tailored resume for a specific job (without applying)."""
-    config = load_config(Path(ctx.obj["config_dir"]) if ctx.obj["config_dir"] else None)
+    config = load_config(
+        Path(ctx.obj["config_dir"]) if ctx.obj["config_dir"] else None,
+        job_profile=job_profile,
+    )
 
     from velvetoverride.agent.llm import LLMClient
     from velvetoverride.agent.resume_tailor import ResumeTailor
@@ -652,6 +680,35 @@ def runs(ctx, limit):
             click.echo(f"    Salary filter: ${r.get('min_salary', '?'):,} — ${r.get('max_salary', '?'):,}")
 
     click.echo(f"\n{'='*70}\n")
+
+
+@cli.command()
+@click.pass_context
+def profiles(ctx):
+    """List available job profiles."""
+    config_dir = Path(ctx.obj["config_dir"]) if ctx.obj["config_dir"] else None
+    profile_list = list_job_profiles(config_dir)
+
+    if not profile_list:
+        click.echo("No job profiles found.")
+        click.echo("Create YAML files in config/job_profiles/ to define profiles.")
+        click.echo("See config/job_profiles/backend_engineer.yaml for an example.")
+        return
+
+    click.echo(f"\n{'='*60}")
+    click.echo("  Available Job Profiles")
+    click.echo(f"{'='*60}")
+
+    for p in profile_list:
+        click.echo(f"\n  {p['slug']}")
+        click.echo(f"    Name: {p['name']}")
+        if p['description']:
+            click.echo(f"    {p['description']}")
+
+    click.echo(f"\n{'='*60}")
+    click.echo(f"  {len(profile_list)} profile(s) available")
+    click.echo(f"  Usage: velvetoverride run --profile <slug>")
+    click.echo(f"{'='*60}\n")
 
 
 if __name__ == "__main__":

@@ -1,0 +1,48 @@
+# ─── Job Profile: Frontend Engineer ──────────────────────────────
+# Overrides for frontend/UI engineering roles.
+
+name: "Frontend Engineer"
+description: "Frontend/UI engineering roles (React, TypeScript, web applications)"
+
+# ─── Search filter overrides ─────────────────────────────────────
+search:
+  keywords:
+    - "Frontend Engineer"
+    - "Frontend Developer"
+    - "UI Engineer"
+    - "Web Developer"
+  experience_levels:
+    - "mid_senior"
+    - "associate"
+    - "entry_level"
+
+# ─── Salary overrides ───────────────────────────────────────────
+salary:
+  min_annual: 120000
+  max_annual: null
+
+# ─── Profile overrides ──────────────────────────────────────────
+summary: >
+  Frontend engineer with 3+ years building responsive, accessible web
+  applications with React and TypeScript. Experienced with modern
+  frontend tooling, component design systems, and performance optimization.
+  Passionate about delivering polished user experiences.
+
+# ─── Skill emphasis ─────────────────────────────────────────────
+skill_emphasis:
+  - "react"
+  - "typescript"
+  - "javascript"
+  - "next.js"
+  - "css"
+  - "html"
+  - "frontend"
+  - "ui"
+  - "responsive design"
+  - "accessibility"
+
+# ─── Answer overrides ───────────────────────────────────────────
+answers:
+  numeric:
+    salary:
+      answer: "140000"

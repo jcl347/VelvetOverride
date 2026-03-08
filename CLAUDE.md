@@ -137,7 +137,12 @@ VelvetOverride/
 │   ├── settings.yaml            # Bot behavior, search filters, browser, LLM, rate limits
 │   ├── profile.yaml             # Master resume data (experience, skills, education)
 │   ├── answers.yaml             # Predetermined answers + learned answer memory
-│   └── .env.example             # Template for secrets (copy to .env)
+│   ├── .env.example             # Template for secrets (copy to .env)
+│   └── job_profiles/            # Job-specific profile overrides
+│       ├── backend_engineer.yaml
+│       ├── frontend_engineer.yaml
+│       ├── fullstack_engineer.yaml
+│       └── devops_engineer.yaml
 ├── src/
 │   └── velvetoverride/
 │       ├── __init__.py
@@ -171,6 +176,7 @@ VelvetOverride/
 ├── tests/
 │   ├── test_config.py           # Config loading (3 tests)
 │   ├── test_field_solver.py     # Hybrid field solver (18 tests)
+│   ├── test_job_profiles.py     # Job profiles loading + merging (25 tests)
 │   ├── test_resume.py           # Resume builder + ATS scorer (7 tests)
 │   ├── test_salary.py           # Salary extraction + filtering (20 tests)
 │   ├── test_search.py           # Search URL builder (6 tests)
@@ -375,6 +381,40 @@ application.
 Implementation: `src/velvetoverride/main.py` → `_find_default_resume()`, fallback
 logic in the apply loop.
 
+### 13. Job Profiles (Multi-Role Targeting)
+Define multiple job profiles to apply to different types of roles with a single
+command. Each profile is a YAML file in `config/job_profiles/` that overrides
+specific parts of the base configuration:
+
+- **Search keywords & filters** — Target different role titles and experience levels
+- **Professional summary** — Rewrite your summary to emphasize relevant experience
+- **Skill emphasis** — Weight job match scoring toward profile-relevant skills (3x)
+- **Salary expectations** — Set different salary floors per role type
+- **Answer overrides** — Customize predetermined answers (e.g., different salary answer)
+
+Everything not overridden inherits from the base `settings.yaml`, `profile.yaml`,
+and `answers.yaml`. This means you maintain one master resume/profile and layer
+role-specific customizations on top.
+
+```bash
+# List available profiles
+velvetoverride profiles
+
+# Run with a specific profile
+velvetoverride run --dry-run --profile backend_engineer
+velvetoverride run --live --profile frontend_engineer
+
+# Tailor a resume using a profile's summary and skill emphasis
+velvetoverride tailor "Backend Engineer" "Acme Corp" jd.txt --profile backend_engineer
+```
+
+Shipped profiles: `backend_engineer`, `frontend_engineer`, `fullstack_engineer`,
+`devops_engineer`. Create your own by adding YAML files to `config/job_profiles/`.
+
+Implementation: `src/velvetoverride/utils/config.py` → `load_job_profile()`,
+`_apply_job_profile()`, `_deep_merge()`. CLI via `--profile` flag on `run` and
+`tailor` commands, `velvetoverride profiles` for listing.
+
 ---
 
 ## How to Run
@@ -418,12 +458,14 @@ velvetoverride run [--dry-run|--live] [-v]   # Run the application bot
   --max-apps N                               # Max applications this run
   --min-salary N                             # Minimum annual salary (e.g. 100000)
   --max-salary N                             # Maximum annual salary (e.g. 200000)
+  --profile SLUG                             # Use a job profile (e.g. backend_engineer)
+velvetoverride profiles                      # List available job profiles
 velvetoverride stats                         # Show enriched statistics (salary, sources, failures, runs)
 velvetoverride export [--format csv|json]    # Export tracking data (includes salary fields)
 velvetoverride review                        # Show questions needing review
 velvetoverride review --approve              # Interactively approve/correct answers (persists to YAML)
 velvetoverride runs [--limit N]              # Show recent bot run history
-velvetoverride tailor TITLE COMPANY JD_FILE  # Generate a tailored resume only
+velvetoverride tailor TITLE COMPANY JD_FILE [--profile SLUG]  # Generate a tailored resume only
 ```
 
 ### Configuration Files
@@ -434,6 +476,7 @@ velvetoverride tailor TITLE COMPANY JD_FILE  # Generate a tailored resume only
 | `config/profile.yaml` | Your resume data — experience, skills, education, personal info |
 | `config/answers.yaml` | Predetermined answers for known question types + learned answers |
 | `config/.env` | Secrets — LinkedIn credentials, Anthropic API key, proxy URL |
+| `config/job_profiles/*.yaml` | Job-specific overrides for search, summary, salary, skills, answers |
 
 ### Where to Run
 
