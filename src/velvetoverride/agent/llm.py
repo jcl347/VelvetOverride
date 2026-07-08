@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from typing import TYPE_CHECKING
 
 import anthropic
@@ -25,6 +26,28 @@ class LLMClient:
             )
         self._client = anthropic.Anthropic(api_key=api_key)
         self._config = config
+
+    def _call_api(self, **kwargs):
+        """Call the Anthropic API with retry on transient errors."""
+        last_exc = None
+        for attempt in range(3):
+            try:
+                return self._client.messages.create(**kwargs)
+            except (
+                anthropic.RateLimitError,
+                anthropic.APIConnectionError,
+                anthropic.InternalServerError,
+            ) as e:
+                last_exc = e
+                delay = 2 ** (attempt + 1)
+                log.warning(
+                    "llm.retry",
+                    attempt=attempt + 1,
+                    delay=delay,
+                    error=str(e),
+                )
+                time.sleep(delay)
+        raise last_exc
 
     @staticmethod
     def _extract_text(response) -> str:
@@ -79,7 +102,7 @@ Rules:
 
         log.info("llm.field_query", question=question[:80], model=model)
 
-        response = self._client.messages.create(
+        response = self._call_api(
             model=model,
             max_tokens=max_tokens,
             messages=[{"role": "user", "content": prompt}],
@@ -99,7 +122,7 @@ Job description:
 
         model = self._config.llm.get("field_model", "claude-sonnet-4-6")
 
-        response = self._client.messages.create(
+        response = self._call_api(
             model=model,
             max_tokens=500,
             messages=[{"role": "user", "content": prompt}],
@@ -138,7 +161,7 @@ Rules:
 
         model = self._config.llm.get("resume_model", "claude-sonnet-4-6")
 
-        response = self._client.messages.create(
+        response = self._call_api(
             model=model,
             max_tokens=500,
             messages=[{"role": "user", "content": prompt}],
@@ -174,7 +197,7 @@ Return nothing else."""
 
         model = self._config.llm.get("field_model", "claude-sonnet-4-6")
 
-        response = self._client.messages.create(
+        response = self._call_api(
             model=model,
             max_tokens=500,
             messages=[{"role": "user", "content": prompt}],
@@ -223,7 +246,7 @@ Rules:
 
         model = self._config.llm.get("field_model", "claude-sonnet-4-6")
 
-        response = self._client.messages.create(
+        response = self._call_api(
             model=model,
             max_tokens=400,
             messages=[{"role": "user", "content": prompt}],

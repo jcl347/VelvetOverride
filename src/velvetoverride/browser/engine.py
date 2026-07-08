@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import random
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -13,6 +14,60 @@ if TYPE_CHECKING:
     from velvetoverride.utils.config import Config
 
 log = get_logger(__name__)
+
+_COMMON_VIEWPORTS = [
+    {"width": 1920, "height": 1080},
+    {"width": 1536, "height": 864},
+    {"width": 1440, "height": 900},
+    {"width": 1366, "height": 768},
+    {"width": 1280, "height": 720},
+]
+
+_STEALTH_JS = """
+Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+
+Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});
+
+Object.defineProperty(navigator, 'hardwareConcurrency', {
+    get: () => [4, 8][Math.floor(Math.random() * 2)]
+});
+
+Object.defineProperty(navigator, 'plugins', {
+    get: () => {
+        const make = (name, filename, desc) => {
+            const p = Object.create(Plugin.prototype);
+            Object.defineProperties(p, {
+                name: {get: () => name},
+                filename: {get: () => filename},
+                description: {get: () => desc},
+                length: {get: () => 1},
+            });
+            return p;
+        };
+        return Object.assign(
+            [
+                make('Chrome PDF Plugin', 'internal-pdf-viewer', 'Portable Document Format'),
+                make('Chrome PDF Viewer', 'mhjfbmdgcfjbbpaeojofohoefgiehjai', ''),
+                make('Native Client', 'internal-nacl-plugin', ''),
+            ],
+            {length: 3}
+        );
+    }
+});
+
+if (!window.chrome) window.chrome = {};
+if (!window.chrome.runtime) {
+    window.chrome.runtime = {
+        connect: function() {},
+        sendMessage: function() {},
+    };
+} else {
+    const orig = window.chrome.runtime.sendMessage;
+    window.chrome.runtime.sendMessage = function() {
+        try { return orig.apply(this, arguments); } catch(e) {}
+    };
+}
+"""
 
 
 class BrowserEngine:
@@ -36,12 +91,21 @@ class BrowserEngine:
 
         self._playwright = await async_playwright().start()
 
+        viewport = bcfg.get("viewport")
+        if viewport is None:
+            viewport = random.choice(_COMMON_VIEWPORTS)
+            log.debug("browser.random_viewport", viewport=viewport)
+
+        timeout_ms = bcfg.get("launch_timeout_ms", 30_000)
+
         launch_kwargs: dict = {
             "channel": bcfg.get("channel", "chrome"),
             "headless": bcfg.get("headless", False),
             "user_data_dir": str(user_data_dir),
-            "no_viewport": bcfg.get("viewport") is None,
+            "no_viewport": False,
+            "viewport": viewport,
             "slow_mo": bcfg.get("slow_mo", 50),
+            "timeout": timeout_ms,
             "args": [
                 "--disable-blink-features=AutomationControlled",
                 "--disable-infobars",
@@ -53,26 +117,30 @@ class BrowserEngine:
         proxy_url = self._config.proxy_url
         if proxy_url:
             launch_kwargs["proxy"] = {"server": proxy_url}
-            log.info("browser.proxy_configured", proxy=proxy_url.split("@")[-1])
-
-        viewport = bcfg.get("viewport")
-        if viewport:
-            launch_kwargs["no_viewport"] = False
-            launch_kwargs["viewport"] = viewport
+            masked = proxy_url.split("@")[-1] if "@" in proxy_url else proxy_url
+            log.info("browser.proxy_configured", proxy=masked)
 
         log.info(
             "browser.launching",
             channel=launch_kwargs["channel"],
             headless=launch_kwargs["headless"],
+            timeout_ms=timeout_ms,
         )
 
         self._context = await self._playwright.chromium.launch_persistent_context(
             **launch_kwargs
         )
+
+        await self._inject_stealth_scripts()
+
         self._page = self._context.pages[0] if self._context.pages else await self._context.new_page()
 
-        log.info("browser.ready")
+        log.info("browser.ready", viewport=viewport)
         return self._page
+
+    async def _inject_stealth_scripts(self) -> None:
+        """Register init scripts on the browser context for navigator hardening."""
+        await self.context.add_init_script(_STEALTH_JS)
 
     @property
     def page(self) -> Page:
@@ -98,10 +166,18 @@ class BrowserEngine:
 
     async def close(self) -> None:
         if self._context:
-            await self._context.close()
-            self._context = None
-            self._page = None
+            try:
+                await self._context.close()
+            except Exception:
+                log.warning("browser.context_close_failed", exc_info=True)
+            finally:
+                self._context = None
+                self._page = None
         if self._playwright:
-            await self._playwright.stop()
-            self._playwright = None
+            try:
+                await self._playwright.stop()
+            except Exception:
+                log.warning("browser.playwright_stop_failed", exc_info=True)
+            finally:
+                self._playwright = None
         log.info("browser.closed")

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import random
+import signal
 import sys
 from pathlib import Path
 
@@ -16,6 +17,14 @@ from velvetoverride.utils.logging import get_logger, setup_logging
 
 log = get_logger(__name__)
 
+_shutdown_requested = False
+
+
+def _handle_shutdown_signal(signum, frame):
+    global _shutdown_requested
+    _shutdown_requested = True
+    log.info("bot.shutdown_requested", signal=signal.Signals(signum).name)
+
 
 async def run_bot(
     config_dir: str | None = None,
@@ -26,6 +35,11 @@ async def run_bot(
     job_profile: str | None = None,
 ) -> None:
     """Main bot orchestration loop."""
+    global _shutdown_requested
+    _shutdown_requested = False
+    signal.signal(signal.SIGINT, _handle_shutdown_signal)
+    signal.signal(signal.SIGTERM, _handle_shutdown_signal)
+
     config = load_config(
         Path(config_dir) if config_dir else None,
         job_profile=job_profile,
@@ -196,6 +210,10 @@ async def run_bot(
         app_flow = ApplicationFlow(page, config, field_solver, db)
 
         for i, listing in enumerate(listings):
+            if _shutdown_requested:
+                log.info("bot.shutdown_graceful", applied=applied_count)
+                break
+
             if applied_count >= max_apps:
                 log.info("bot.max_reached", count=applied_count)
                 break
@@ -288,9 +306,10 @@ async def run_bot(
         export_review_queue(db, export_path)
 
         # ── Finish run tracking ──
+        run_status = "interrupted" if _shutdown_requested else "completed"
         db.finish_run(
             run_id,
-            status="completed",
+            status=run_status,
             listings_found=listings_found,
             listings_after_filter=listings_after_filter,
             applied_count=applied_count,
@@ -676,8 +695,10 @@ def runs(ctx, limit):
         click.echo(f"    Applied: {r.get('applied_count', 0)}  Failed: {r.get('failed_count', 0)}  Skipped: {r.get('skipped_count', 0)}")
         if r.get("error_message"):
             click.echo(f"    Error: {r['error_message'][:100]}")
-        if r.get("min_salary") or r.get("max_salary"):
-            click.echo(f"    Salary filter: ${r.get('min_salary', '?'):,} — ${r.get('max_salary', '?'):,}")
+        if r.get("min_salary") is not None or r.get("max_salary") is not None:
+            min_s = f"${r['min_salary']:,}" if r.get("min_salary") is not None else "?"
+            max_s = f"${r['max_salary']:,}" if r.get("max_salary") is not None else "?"
+            click.echo(f"    Salary filter: {min_s} — {max_s}")
 
     click.echo(f"\n{'='*70}\n")
 

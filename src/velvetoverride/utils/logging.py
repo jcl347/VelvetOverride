@@ -54,12 +54,12 @@ def setup_logging(
 
 def _setup_file_handler(log_dir: str, level: str) -> None:
     """Add a file handler to the stdlib root logger for persistent logs."""
-    from datetime import datetime
+    from datetime import datetime, timezone
 
     log_path = Path(log_dir)
     log_path.mkdir(parents=True, exist_ok=True)
 
-    filename = f"velvetoverride_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.log"
+    filename = f"velvetoverride_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.log"
     file_path = log_path / filename
 
     handler = logging.FileHandler(str(file_path))

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from velvetoverride.tracking.models import FieldType
@@ -275,6 +275,6 @@ class FieldSolver:
         learned[question] = {
             "answer": answer,
             "field_type": field_type,
-            "added_date": datetime.utcnow().strftime("%Y-%m-%d"),
+            "added_date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
         }
         log.info("solver.answer_learned", question=question[:60], answer=answer[:30])

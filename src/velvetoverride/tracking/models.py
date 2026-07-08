@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 
 
@@ -51,7 +51,7 @@ class ApplicationRecord:
     status: str = ApplicationStatus.APPLIED.value
     resume_version: str = ""
     match_score: float = 0.0
-    applied_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+    applied_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     notes: str = ""
     screenshot_path: str = ""
     salary_min: int | None = None

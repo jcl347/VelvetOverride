@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -286,7 +286,7 @@ class ApplicationFlow:
         ss_dir = Path(self._config.bot.get("screenshots_dir", "screenshots"))
         ss_dir.mkdir(parents=True, exist_ok=True)
         safe_company = "".join(c if c.isalnum() else "_" for c in listing.company)
-        filename = f"{safe_company}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_step{self._screenshot_count}.png"
+        filename = f"{safe_company}_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_step{self._screenshot_count}.png"
         ss_path = str(ss_dir / filename)
         try:
             await self._page.screenshot(path=ss_path)
@@ -324,7 +324,7 @@ class ApplicationFlow:
             job_description=jd,
             status=final_status.value,
             match_score=listing.match_score,
-            applied_at=datetime.utcnow().isoformat(),
+            applied_at=datetime.now(timezone.utc).isoformat(),
             notes=notes,
             screenshot_path=";".join(self._screenshot_paths) if self._screenshot_paths else "",
             questions=self._questions,

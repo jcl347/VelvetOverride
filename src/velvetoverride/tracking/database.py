@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -93,6 +93,7 @@ class TrackingDB:
         self._conn = sqlite3.connect(str(self._db_path))
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA foreign_keys = ON")
+        self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.executescript(SCHEMA)
         self._run_migrations()
         log.info("tracking.db_connected", path=str(self._db_path))
@@ -134,7 +135,7 @@ class TrackingDB:
                (started_at, dry_run, max_apps, min_salary, max_salary, config_snapshot)
                VALUES (?, ?, ?, ?, ?, ?)""",
             (
-                datetime.utcnow().isoformat(),
+                datetime.now(timezone.utc).isoformat(),
                 1 if dry_run else 0,
                 max_apps,
                 min_salary,
@@ -168,7 +169,7 @@ class TrackingDB:
                error_message = ?
                WHERE id = ?""",
             (
-                datetime.utcnow().isoformat(),
+                datetime.now(timezone.utc).isoformat(),
                 status,
                 listings_found,
                 listings_after_filter,
