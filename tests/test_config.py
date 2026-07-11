@@ -87,3 +87,37 @@ def test_falls_back_to_committed_when_no_local(tmp_path):
     (tmp_path / "answers.yaml").write_text("yes_no: {}\n", encoding="utf-8")
     data = _load_local_first(tmp_path, "answers")
     assert "yes_no" in data
+
+
+def test_placeholder_profile_is_blocked():
+    """The bot must refuse to run with the committed Jane Doe placeholder."""
+    from velvetoverride.main import _placeholder_profile_reason
+    from velvetoverride.utils.config import Config
+    ph = Config(profile={"personal": {
+        "first_name": "Jane", "last_name": "Doe", "email": "jane.doe@example.com"}})
+    assert _placeholder_profile_reason(ph)
+
+
+def test_committed_profile_yaml_is_the_placeholder():
+    """Ensure we never commit real PII: the tracked profile.yaml IS a placeholder."""
+    from pathlib import Path
+    from velvetoverride.main import _placeholder_profile_reason
+    from velvetoverride.utils.config import Config, load_yaml
+    root = Path(__file__).resolve().parents[1]
+    data = load_yaml(root / "config" / "profile.yaml")
+    assert _placeholder_profile_reason(Config(profile=data)), \
+        "config/profile.yaml must be a placeholder — real data goes in profile.local.yaml"
+
+
+def test_real_profile_passes_guard():
+    from velvetoverride.main import _placeholder_profile_reason
+    from velvetoverride.utils.config import Config
+    real = Config(profile={"personal": {
+        "first_name": "Jordan", "last_name": "Limperis", "email": "jcl347@cornell.edu"}})
+    assert _placeholder_profile_reason(real) == ""
+
+
+def test_missing_identity_is_blocked():
+    from velvetoverride.main import _placeholder_profile_reason
+    from velvetoverride.utils.config import Config
+    assert _placeholder_profile_reason(Config(profile={"personal": {}}))

@@ -37,6 +37,18 @@ async def run_bot(
     # settings.yaml so runs can be pointed at any jobs/locations on the fly.
     _apply_search_overrides(config, keywords, locations)
 
+    # SAFETY GUARD: never apply with the committed placeholder identity.
+    # (config/profile.yaml is a template; your real data belongs in
+    # config/profile.local.yaml.) This prevents submitting as "Jane Doe".
+    placeholder_reason = _placeholder_profile_reason(config)
+    if placeholder_reason:
+        raise ValueError(
+            "Refusing to run: the profile still looks like the committed "
+            f"placeholder ({placeholder_reason}). Copy it to a real local file:\n"
+            "  cp config/profile.yaml config/profile.local.yaml\n"
+            "then edit config/profile.local.yaml with your real details."
+        )
+
     # Whether to leave the browser window open when the run ends
     if keep_open is None:
         keep_open = config.browser.get("keep_open", False)
@@ -456,6 +468,30 @@ async def run_bot(
             except (KeyboardInterrupt, asyncio.CancelledError):
                 pass
         await browser.close()
+
+
+# Known placeholder values from the committed config/profile.yaml template.
+_PLACEHOLDER_NAMES = {("jane", "doe")}
+_PLACEHOLDER_EMAILS = {"jane.doe@example.com", "you@example.com", "jane.doe@example"}
+
+
+def _placeholder_profile_reason(config) -> str:
+    """Return a reason string if the profile is still the template, else ''.
+
+    Guards against ever applying with the committed placeholder identity.
+    """
+    p = config.personal
+    email = str(p.get("email", "")).strip().lower()
+    first = str(p.get("first_name", "")).strip().lower()
+    last = str(p.get("last_name", "")).strip().lower()
+
+    if email in _PLACEHOLDER_EMAILS:
+        return f"email={email}"
+    if (first, last) in _PLACEHOLDER_NAMES:
+        return f"name={first} {last}"
+    if not first or not email:
+        return "missing name/email"
+    return ""
 
 
 def _apply_search_overrides(config, keywords, locations) -> None:
