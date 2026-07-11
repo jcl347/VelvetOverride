@@ -24,7 +24,7 @@ with a localhost web dashboard for human review.
 - **CAPTCHA handling** — 3 strategies: manual (VNC), 2Captcha API, CapSolver API
 - **Error tracking** — errors are recorded per run and surfaced in the dashboard and `errors` CLI
 - **Localhost dashboard** — Flask web UI showing applications, runs, errors, and token usage
-- **Daily scheduling** — one-command Windows Task Scheduler setup for a small 9 AM PST run
+- **Scheduling** — one-command Windows Task Scheduler setup (every 5 days at 9 AM PST by default)
 - **Dry-run mode** — fills forms without submitting for safe calibration
 
 ## Setup
@@ -122,14 +122,15 @@ velvetoverride review [--approve]             Review / approve LLM-answered ques
 velvetoverride tailor TITLE COMPANY JD_FILE   Generate a tailored resume (no apply)
 ```
 
-### Daily 9 AM PST run (Windows)
+### Scheduled run (Windows, every 5 days at 9 AM PST)
 
 ```powershell
-# Registers a per-user scheduled task at the local equivalent of 9:00 AM Pacific
+# Registers a per-user task at the local equivalent of 9:00 AM Pacific, every 5 days
 powershell -ExecutionPolicy Bypass -File scripts\register_schedule.ps1
+# Custom cadence (e.g. daily):  ... register_schedule.ps1 -DaysInterval 1
 
 # Test it immediately
-Start-ScheduledTask -TaskName "VelvetOverride Daily"
+Start-ScheduledTask -TaskName "VelvetOverride"
 ```
 
 The task runs `scripts\run_daily.ps1`, which respects `settings.yaml` (dry-run stays on

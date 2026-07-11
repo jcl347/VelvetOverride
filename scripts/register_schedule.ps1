@@ -1,17 +1,21 @@
-# register_schedule.ps1 — register a daily VelvetOverride run at 9:00 AM PST.
+# register_schedule.ps1 — register a recurring VelvetOverride run at 9:00 AM PST.
 #
 # Windows Task Scheduler fires at the machine's LOCAL time. This script computes
 # the local-time equivalent of 9:00 AM America/Los_Angeles so it stays correct
 # even if your PC is in another timezone (and across PST/PDT).
 #
+# Runs every -DaysInterval days (default 5).
+#
 # Usage (run in PowerShell, no admin needed for a per-user task):
 #   powershell -ExecutionPolicy Bypass -File scripts\register_schedule.ps1
+#   powershell -ExecutionPolicy Bypass -File scripts\register_schedule.ps1 -DaysInterval 1
 #
 # To remove it later:
-#   Unregister-ScheduledTask -TaskName "VelvetOverride Daily" -Confirm:$false
+#   Unregister-ScheduledTask -TaskName "VelvetOverride" -Confirm:$false
 
 param(
-    [string]$TaskName = "VelvetOverride Daily",
+    [string]$TaskName = "VelvetOverride",
+    [int]$DaysInterval = 5,    # run once every N days
     [int]$PacificHour = 9,     # 9 AM Pacific
     [int]$PacificMinute = 0
 )
@@ -39,12 +43,12 @@ try {
 
 $Action = New-ScheduledTaskAction -Execute "powershell.exe" `
     -Argument "-NoProfile -File `"$RunScript`""
-$Trigger = New-ScheduledTaskTrigger -Daily -At $TriggerTime
+$Trigger = New-ScheduledTaskTrigger -Daily -DaysInterval $DaysInterval -At $TriggerTime
 $Settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -DontStopOnIdleEnd `
     -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
 
 Register-ScheduledTask -TaskName $TaskName -Action $Action -Trigger $Trigger `
-    -Settings $Settings -Description "Daily LinkedIn application run (VelvetOverride)" -Force
+    -Settings $Settings -Description "LinkedIn application run every $DaysInterval days (VelvetOverride)" -Force
 
-Write-Host "Registered scheduled task '$TaskName' (daily at $($TriggerTime.ToString('HH:mm')) local)."
+Write-Host "Registered scheduled task '$TaskName' (every $DaysInterval days at $($TriggerTime.ToString('HH:mm')) local)."
 Write-Host "Test it now with:  Start-ScheduledTask -TaskName '$TaskName'"
