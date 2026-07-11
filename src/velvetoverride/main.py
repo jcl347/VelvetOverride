@@ -23,12 +23,23 @@ async def run_bot(
     max_apps_override: int | None = None,
     min_salary: int | None = None,
     max_salary: int | None = None,
+    keep_open: bool | None = None,
+    keywords: list[str] | None = None,
+    locations: list[str] | None = None,
 ) -> None:
     """Main bot orchestration loop."""
     config = load_config(Path(config_dir) if config_dir else None)
 
     if dry_run is not None:
         config.settings.setdefault("bot", {})["dry_run"] = dry_run
+
+    # Search overrides: CLI target roles / locations take precedence over
+    # settings.yaml so runs can be pointed at any jobs/locations on the fly.
+    _apply_search_overrides(config, keywords, locations)
+
+    # Whether to leave the browser window open when the run ends
+    if keep_open is None:
+        keep_open = config.browser.get("keep_open", False)
 
     is_dry_run = config.bot.get("dry_run", True)
     max_apps = max_apps_override or config.bot.get("max_applications", 25)
@@ -45,6 +56,7 @@ async def run_bot(
         min_salary=effective_min_salary,
         max_salary=effective_max_salary,
         keywords=config.search.get("keywords", []),
+        locations=config.search.get("locations", []),
     )
 
     # Late imports to avoid loading heavy deps at CLI parse time
@@ -82,8 +94,9 @@ async def run_bot(
     )
 
     llm: LLMClient | None = None
-    if config.anthropic_api_key:
+    if config.has_llm:
         llm = LLMClient(config)
+        log.info("bot.llm_ready", provider=config.llm_provider)
     else:
         log.warning("bot.no_api_key", msg="Running without LLM — config-only answers")
 
@@ -183,8 +196,8 @@ async def run_bot(
 
         listings_after_filter = len(listings)
 
-        # ── Find default resume for fallback ──
-        default_resume = _find_default_resume(config)
+        # ── Base resume for fallback (real, profile-based — never a test file) ──
+        default_resume = _ensure_base_resume(config, resume_builder) or _find_default_resume(config)
 
         # ── Apply to each listing ──
         app_flow = ApplicationFlow(page, config, field_solver, db)
@@ -194,9 +207,9 @@ async def run_bot(
                 log.info("bot.max_reached", count=applied_count)
                 break
 
-            # Deduplication
-            if db.is_already_applied(listing.url):
-                log.info("bot.skip_duplicate", url=listing.url)
+            # Deduplication — by canonical LinkedIn job ID, then normalized URL
+            if db.is_already_applied(listing.url, listing.job_id):
+                log.info("bot.skip_duplicate", url=listing.url, job_id=listing.job_id)
                 skipped_count += 1
                 continue
 
@@ -227,6 +240,76 @@ async def run_bot(
                 score=f"{listing.match_score:.0f}",
             )
 
+            # Ensure we have the full job description before tailoring — the
+            # list-scrape panel is unreliable, so fetch it directly if empty.
+            if not listing.description or len(listing.description) < 50:
+                from velvetoverride.linkedin.search import get_job_description
+                try:
+                    jd = await get_job_description(page, listing.url)
+                    if jd:
+                        listing.description = jd
+                        # Re-extract salary now that we have the JD
+                        salary = extract_salary(jd)
+                        if salary:
+                            listing.salary_min = salary.annual_min
+                            listing.salary_max = salary.annual_max
+                            listing.salary_raw = salary.raw_text
+                        # Recompute the match score against the real JD
+                        if llm:
+                            _score_listings([listing], config, llm)
+                            log.info("bot.rescored", title=listing.title, score=f"{listing.match_score:.0f}")
+                except Exception as e:
+                    log.warning("bot.jd_fetch_error", error=str(e), url=listing.url)
+
+            # JD-keyword blacklist (applied now that we have the full description)
+            blacklist_kw = [k.lower() for k in config.search.get("blacklist_keywords", [])]
+            if listing.description and any(k in listing.description.lower() for k in blacklist_kw):
+                log.info("bot.skip_blacklisted_keyword", title=listing.title, company=listing.company)
+                skipped_count += 1
+                continue
+
+            # ── ChatGPT experience-fit check (am I really a lead?) ──
+            fit_cfg = config.settings.get("fit", {})
+            if llm and fit_cfg.get("enabled", True) and listing.description:
+                try:
+                    verdict = llm.evaluate_fit(
+                        listing.title, listing.company, listing.description,
+                        _fit_profile_summary(config),
+                    )
+                    listing.fit_score = verdict["fit_score"]
+                    listing.fit_seniority = verdict["seniority"]
+                    listing.fit_recommend = verdict["recommend"]
+                    listing.fit_reasoning = verdict["reasoning"]
+                    listing.fit_gaps = "; ".join(verdict["gaps"])
+                    log.info(
+                        "bot.fit", title=listing.title, score=verdict["fit_score"],
+                        seniority=verdict["seniority"], recommend=verdict["recommend"],
+                        gaps=verdict["gaps"][:3],
+                    )
+
+                    min_fit = fit_cfg.get("min_score", 0) or 0
+                    skip_recs = set(fit_cfg.get("skip_recommendations", []) or [])
+                    reason = ""
+                    if verdict["fit_score"] < min_fit:
+                        reason = f"fit {verdict['fit_score']} < min {min_fit}"
+                    elif verdict["recommend"] in skip_recs:
+                        reason = f"fit recommend={verdict['recommend']}"
+
+                    if reason:
+                        log.info("bot.skip_poor_fit", title=listing.title,
+                                 company=listing.company, reason=reason,
+                                 why=verdict["reasoning"][:120])
+                        db.log_error(
+                            stage="fit_skip", run_id=run_id, error_type="poor_fit",
+                            message=f"{reason} — {verdict['reasoning']}",
+                            company=listing.company, job_title=listing.title,
+                            job_url=listing.url,
+                        )
+                        skipped_count += 1
+                        continue
+                except Exception as e:
+                    log.warning("bot.fit_error", error=str(e), title=listing.title)
+
             # Tailor resume if LLM available, with fallback to default resume
             resume_path = None
             if resume_tailor and listing.description:
@@ -237,6 +320,11 @@ async def run_bot(
                     log.info("bot.resume_tailored", ats_score=f"{ats_score:.0f}")
                 except Exception as e:
                     log.warning("bot.resume_tailor_error", error=str(e))
+                    db.log_error(
+                        stage="resume_tailor", message=str(e), run_id=run_id,
+                        error_type=type(e).__name__, company=listing.company,
+                        job_title=listing.title, job_url=listing.url,
+                    )
                     resume_path = default_resume
                     if resume_path:
                         log.info("bot.resume_fallback", path=resume_path)
@@ -245,13 +333,52 @@ async def run_bot(
                 resume_path = default_resume
 
             # Apply
-            record = await app_flow.apply_to_job(listing, resume_path)
+            try:
+                record = await app_flow.apply_to_job(listing, resume_path)
+            except Exception as e:
+                log.error("bot.apply_error", error=str(e), title=listing.title)
+                db.log_error(
+                    stage="apply", message=str(e), run_id=run_id,
+                    error_type=type(e).__name__, company=listing.company,
+                    job_title=listing.title, job_url=listing.url,
+                )
+                failed_count += 1
+                continue
+
+            record.job_id = listing.job_id
             if resume_path:
                 record.resume_version = resume_path
             record.salary_min = listing.salary_min
             record.salary_max = listing.salary_max
             record.salary_raw = listing.salary_raw
-            db.save_application(record, run_id=run_id)
+            record.fit_score = listing.fit_score
+            record.fit_seniority = listing.fit_seniority
+            record.fit_recommend = listing.fit_recommend
+            record.fit_reasoning = listing.fit_reasoning
+            record.fit_gaps = listing.fit_gaps
+            try:
+                db.save_application(record, run_id=run_id)
+            except Exception as e:
+                # Never let a tracking write abort the whole run
+                log.error("bot.save_failed", error=str(e), company=listing.company)
+                db.log_error(
+                    stage="save_application", message=str(e), run_id=run_id,
+                    error_type=type(e).__name__, company=listing.company,
+                    job_title=listing.title, job_url=listing.url,
+                )
+
+            # Track per-job outcome on the dashboard so failures are reviewable
+            if record.status in (
+                ApplicationStatus.FAILED.value,
+                ApplicationStatus.NEEDS_REVIEW.value,
+                ApplicationStatus.SKIPPED.value,
+            ):
+                db.log_error(
+                    stage="apply_outcome", run_id=run_id,
+                    error_type=record.status,
+                    message=record.notes or f"status={record.status}",
+                    company=listing.company, job_title=listing.title, job_url=listing.url,
+                )
 
             if record.status in (ApplicationStatus.APPLIED.value, ApplicationStatus.DRY_RUN.value, ApplicationStatus.NEEDS_REVIEW.value):
                 applied_count += 1
@@ -281,6 +408,9 @@ async def run_bot(
             export_json(db, export_path)
         export_review_queue(db, export_path)
 
+        # ── Record LLM token usage for this run ──
+        _record_usage(db, run_id, llm)
+
         # ── Finish run tracking ──
         db.finish_run(
             run_id,
@@ -304,6 +434,8 @@ async def run_bot(
 
     except Exception as e:
         log.error("bot.fatal_error", error=str(e))
+        db.log_error(stage="fatal", message=str(e), run_id=run_id, error_type=type(e).__name__)
+        _record_usage(db, run_id, llm)
         db.finish_run(
             run_id,
             status="failed",
@@ -316,8 +448,129 @@ async def run_bot(
         )
         raise
     finally:
-        await browser.close()
         db.close()
+        if keep_open:
+            log.info("bot.keep_open", msg="Run finished — leaving the browser open. Press Ctrl-C to close.")
+            try:
+                await asyncio.Event().wait()  # keep the process (and window) alive
+            except (KeyboardInterrupt, asyncio.CancelledError):
+                pass
+        await browser.close()
+
+
+def _apply_search_overrides(config, keywords, locations) -> None:
+    """Override settings.yaml search roles/locations with CLI values, if given."""
+    if keywords:
+        config.settings.setdefault("search", {})["keywords"] = list(keywords)
+    if locations:
+        config.settings.setdefault("search", {})["locations"] = list(locations)
+
+
+def _record_usage(db, run_id, llm) -> None:
+    """Persist LLM token usage for a run (no-op if no LLM was used)."""
+    if not llm:
+        return
+    u = llm.usage
+    db.record_run_usage(
+        run_id,
+        u.prompt_tokens,
+        u.completion_tokens,
+        u.total_tokens,
+        u.calls,
+        round(u.est_cost_usd, 4),
+    )
+    log.info(
+        "bot.token_usage",
+        total_tokens=u.total_tokens,
+        calls=u.calls,
+        est_cost_usd=round(u.est_cost_usd, 4),
+    )
+
+
+def _fit_profile_summary(config) -> str:
+    """A factual career summary for the fit judgement.
+
+    Includes real titles and dates so the model can judge seniority honestly
+    rather than taking a job's title at face value.
+    """
+    profile = config.profile
+    parts: list[str] = []
+
+    summary = profile.get("summary", "")
+    if summary:
+        parts.append(f"Summary: {' '.join(str(summary).split())}")
+
+    roles = []
+    for job in profile.get("experience", []):
+        roles.append(
+            f"- {job.get('title','')} at {job.get('company','')} "
+            f"({job.get('start_date','')} to {job.get('end_date','')})"
+        )
+    if roles:
+        parts.append("Career history (most recent first):\n" + "\n".join(roles))
+
+    tech = config.technology_experience
+    if tech:
+        years = ", ".join(
+            f"{k}: {v}y" for k, v in tech.items() if k != "default"
+        )
+        parts.append(f"Years per technology: {years}")
+
+    edu = profile.get("education", [])
+    if edu:
+        parts.append(
+            "Education: "
+            + "; ".join(
+                f"{e.get('degree','')} in {e.get('field','')}, {e.get('institution','')}"
+                for e in edu
+            )
+        )
+    return "\n\n".join(parts)
+
+
+def _ensure_base_resume(config, resume_builder) -> str | None:
+    """Generate a real base resume from the profile (untailored) as a fallback.
+
+    Named after the applicant so uploads are never a stray 'test' file.
+    """
+    try:
+        profile = config.profile
+        name = f"{config.personal.get('first_name','')}_{config.personal.get('last_name','')}".strip("_") or "Resume"
+        from velvetoverride.agent.resume_tailor import _build_projects, _pretty_term
+
+        experience = []
+        for job in profile.get("experience", []):
+            techs: list[str] = []
+            for b in job.get("bullets", []):
+                for s in b.get("skills", []) or []:
+                    pretty = _pretty_term(s)
+                    if pretty and pretty.lower() not in {t.lower() for t in techs}:
+                        techs.append(pretty)
+            experience.append({
+                "company": job.get("company", ""),
+                "title": job.get("title", ""),
+                "start_date": job.get("start_date", ""),
+                "end_date": job.get("end_date", ""),
+                "location": job.get("location", ""),
+                "bullets": [b.get("text", "") for b in job.get("bullets", [])],
+                "technologies": techs[:8],
+            })
+        data = {
+            "personal": profile.get("personal", {}),
+            "summary": profile.get("summary", ""),
+            "experience": experience,
+            "projects": _build_projects(profile.get("projects", [])),
+            "education": profile.get("education", []),
+            "skills": {k: v for k, v in profile.get("skills", {}).items() if isinstance(v, list)},
+            "certifications": profile.get("certifications", []),
+            "target_keywords": [],
+        }
+        path = resume_builder.build(data, f"{name}_Resume")
+        log.info("bot.base_resume_ready", path=path)
+        return path
+    except Exception as e:
+        log.warning("bot.base_resume_failed", error=str(e))
+        return None
 
 
 def _find_default_resume(config) -> str | None:
@@ -383,10 +636,78 @@ def cli(ctx, config_dir, verbose, json_log):
 @click.option("--max-apps", type=int, default=None, help="Max applications this run (overrides settings.yaml)")
 @click.option("--min-salary", type=int, default=None, help="Minimum annual salary filter (e.g. 100000)")
 @click.option("--max-salary", type=int, default=None, help="Maximum annual salary filter (e.g. 200000)")
+@click.option("--keyword", "-k", "keywords", multiple=True,
+              help="Target role to search (repeatable). Overrides settings.yaml search.keywords.")
+@click.option("--location", "-l", "locations", multiple=True,
+              help="Location to search (repeatable). Overrides settings.yaml search.locations.")
+@click.option("--keep-open/--no-keep-open", default=None, help="Leave the browser open after the run")
+@click.option("--loop", is_flag=True, help="Keep re-running passes until stopped (Ctrl-C)")
+@click.option("--loop-delay", type=int, default=300, help="Seconds to wait between loop passes")
+@click.option("--max-loops", type=int, default=0, help="Stop after N passes (0 = unlimited)")
 @click.pass_context
-def run(ctx, dry_run, max_apps, min_salary, max_salary):
-    """Run the full application bot pipeline."""
-    asyncio.run(run_bot(ctx.obj["config_dir"], dry_run, max_apps, min_salary, max_salary))
+def run(ctx, dry_run, max_apps, min_salary, max_salary, keywords, locations,
+        keep_open, loop, loop_delay, max_loops):
+    """Run the full application bot pipeline (optionally on a continuous loop).
+
+    Target roles and locations come from config/settings.yaml, but can be
+    overridden here, e.g.:
+
+        velvetoverride run --live -k "AI Engineer" -k "ML Engineer" -l "Remote"
+    """
+    kw = list(keywords) or None
+    loc = list(locations) or None
+    if loop:
+        # keep_open would block forever, so force it off between passes
+        asyncio.run(
+            _run_loop(
+                ctx.obj["config_dir"], dry_run, max_apps, min_salary, max_salary,
+                loop_delay=loop_delay, max_loops=max_loops,
+                keywords=kw, locations=loc,
+            )
+        )
+    else:
+        asyncio.run(run_bot(
+            ctx.obj["config_dir"], dry_run, max_apps, min_salary, max_salary,
+            keep_open, keywords=kw, locations=loc,
+        ))
+
+
+async def _run_loop(
+    config_dir, dry_run, max_apps, min_salary, max_salary,
+    loop_delay: int = 300, max_loops: int = 0,
+    keywords: list[str] | None = None, locations: list[str] | None = None,
+) -> None:
+    """Re-run the pipeline continuously.
+
+    Each pass re-searches (fresh 24h postings), skips jobs already successfully
+    applied to, and retries ones that previously failed. A pass that crashes is
+    logged and the loop continues.
+    """
+    pass_num = 0
+    while True:
+        pass_num += 1
+        log.info("loop.pass_starting", pass_num=pass_num, max_loops=max_loops or "unlimited")
+        try:
+            await run_bot(
+                config_dir, dry_run, max_apps, min_salary, max_salary,
+                keep_open=False, keywords=keywords, locations=locations,
+            )
+        except KeyboardInterrupt:
+            log.info("loop.interrupted", pass_num=pass_num)
+            raise
+        except Exception as e:
+            log.error("loop.pass_failed", pass_num=pass_num, error=str(e))
+
+        if max_loops and pass_num >= max_loops:
+            log.info("loop.finished", passes=pass_num)
+            return
+
+        log.info("loop.sleeping", seconds=loop_delay, next_pass=pass_num + 1)
+        try:
+            await asyncio.sleep(loop_delay)
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            log.info("loop.interrupted_during_sleep")
+            return
 
 
 @cli.command()
@@ -449,9 +770,100 @@ def stats(ctx):
             failed = r.get("failed_count", 0)
             click.echo(f"  {started} [{mode}] {status} — applied:{applied} failed:{failed}")
 
+    # Token usage across recent runs
+    total_tokens = sum((r.get("total_tokens") or 0) for r in s.get("recent_runs", []))
+    if total_tokens:
+        click.echo("\nLLM token usage (recent runs):")
+        click.echo(f"  Total tokens: {total_tokens:,}")
+
+    # Errors
+    err_count = db.error_count()
+    click.echo(f"\nRecorded errors: {err_count}")
+
     # Review queue
     click.echo(f"\nQuestions needing review: {s['questions_needing_review']}")
     click.echo(f"{'='*60}\n")
+
+
+@cli.command()
+@click.option("--host", default="127.0.0.1", help="Bind host")
+@click.option("--port", type=int, default=5000, help="Bind port")
+@click.pass_context
+def dashboard(ctx, host, port):
+    """Launch the localhost web dashboard to track application progress."""
+    config = load_config(Path(ctx.obj["config_dir"]) if ctx.obj["config_dir"] else None)
+    from velvetoverride.web.dashboard import run_dashboard
+
+    db_path = config.tracking.get("database_path", "data/applications.db")
+    click.echo(f"\n  VelvetOverride dashboard → http://{host}:{port}")
+    click.echo("  (reads data/applications.db · Ctrl-C to stop)\n")
+    run_dashboard(db_path=db_path, host=host, port=port)
+
+
+@cli.command(name="token-test")
+@click.option("--jobs", "-n", type=int, default=10, help="Number of sample jobs to run")
+@click.option("--apps-per-day", type=int, default=None, help="For the daily projection")
+@click.pass_context
+def token_test(ctx, jobs, apps_per_day):
+    """Estimate token use by running the LLM pipeline on sample jobs (no LinkedIn)."""
+    config = load_config(Path(ctx.obj["config_dir"]) if ctx.obj["config_dir"] else None)
+    if not config.has_llm:
+        click.echo("No LLM API key configured. Set OPENAI_API_KEY in config/.env.")
+        return
+
+    from velvetoverride.agent.token_test import run_token_test
+
+    per_day = apps_per_day or config.bot.get("max_applications", 5)
+    click.echo(f"\nRunning token test on {jobs} sample jobs "
+               f"(provider={config.llm_provider}, model={config.llm.get('field_model')})...\n")
+    r = run_token_test(config, n=jobs, apps_per_day=per_day)
+
+    click.echo(f"{'='*64}")
+    click.echo("  Token Usage Test")
+    click.echo(f"{'='*64}")
+    click.echo(f"  Provider / models : {r['provider']} - {r['field_model']} + {r['resume_model']}")
+    click.echo(f"  Jobs tested       : {r['jobs_tested']}")
+    click.echo(f"  Total LLM calls   : {r['total_calls']}")
+    click.echo(f"  Total tokens      : {r['total_tokens']:,} "
+               f"(prompt {r['prompt_tokens']:,} / completion {r['completion_tokens']:,})")
+    click.echo(f"  Avg per job       : {r['avg_tokens_per_job']:,} tokens")
+    click.echo(f"  Est. cost (test)  : ${r['est_cost_usd']:.4f}  (billed rate; $0 on shared free tokens)")
+    click.echo("\n  Projection:")
+    p = r["projection"]
+    click.echo(f"    {p['apps_per_day']} apps/day  -> {p['tokens_per_day']:,} tokens/day, "
+               f"~{p['tokens_per_month']:,}/month")
+    click.echo(f"    Est. billed cost -> ${p['est_cost_per_day_usd']:.4f}/day")
+    click.echo("\n  Free-token headroom (data-sharing enabled):")
+    click.echo(f"    mini models: ~2.5M tokens/day (tier 1-2) -- usage is "
+               f"{(p['tokens_per_day']/2_500_000*100):.2f}% of that bucket")
+    click.echo(f"{'='*64}\n")
+
+
+@cli.command()
+@click.option("--limit", type=int, default=50, help="Number of recent errors to show")
+@click.pass_context
+def errors(ctx, limit):
+    """Show recorded errors from bot runs."""
+    config = load_config(Path(ctx.obj["config_dir"]) if ctx.obj["config_dir"] else None)
+    from velvetoverride.tracking.database import TrackingDB
+
+    db = TrackingDB(config.tracking.get("database_path", "data/applications.db"))
+    db.connect()
+    errs = db.get_errors(limit=limit)
+    db.close()
+
+    if not errs:
+        click.echo("No errors recorded.")
+        return
+
+    click.echo(f"\n{'='*70}\n  Recorded Errors ({len(errs)})\n{'='*70}")
+    for e in errs:
+        when = (e.get("occurred_at") or "")[:19].replace("T", " ")
+        click.echo(f"\n  [{when}] {e.get('stage','?')} · {e.get('error_type','')}")
+        if e.get("company") or e.get("job_title"):
+            click.echo(f"    Job: {e.get('company','')} — {e.get('job_title','')}")
+        click.echo(f"    {e.get('message','')[:200]}")
+    click.echo(f"\n{'='*70}\n")
 
 
 @cli.command()
@@ -570,7 +982,7 @@ def _persist_learned_answers(config, field_solver) -> None:
     """Write learned answers back to answers.yaml."""
     answers_path = config.config_dir / "answers.yaml"
     try:
-        with open(answers_path) as f:
+        with open(answers_path, encoding="utf-8") as f:
             answers_data = yaml.safe_load(f) or {}
     except FileNotFoundError:
         answers_data = {}
@@ -578,7 +990,7 @@ def _persist_learned_answers(config, field_solver) -> None:
     # Merge learned answers
     answers_data["learned"] = field_solver._answers.get("learned", {})
 
-    with open(answers_path, "w") as f:
+    with open(answers_path, "w", encoding="utf-8") as f:
         yaml.dump(answers_data, f, default_flow_style=False, sort_keys=False, allow_unicode=True)
 
     log.info("review.answers_persisted", path=str(answers_path), count=len(answers_data.get("learned", {})))
@@ -598,7 +1010,7 @@ def tailor(ctx, job_title, company, job_description_file):
     from velvetoverride.resume.builder import ResumeBuilder
     from velvetoverride.resume.scorer import ATSScorer
 
-    jd = Path(job_description_file).read_text()
+    jd = Path(job_description_file).read_text(encoding="utf-8")
 
     llm = LLMClient(config)
     builder = ResumeBuilder(

@@ -19,6 +19,31 @@ LOGIN_URL = "https://www.linkedin.com/login"
 FEED_URL = "https://www.linkedin.com/feed/"
 
 
+async def _read_login_errors(page: Page) -> list[str]:
+    """Read visible red error/validation messages on the login page."""
+    messages: list[str] = []
+    try:
+        err = page.locator(
+            '#error-for-username, #error-for-password, '
+            '.form__label--error, [role="alert"], '
+            '.alert-content, div.form-toast--error, '
+            'div[error-for], .artdeco-inline-feedback--error'
+        )
+        for i in range(min(await err.count(), 6)):
+            el = err.nth(i)
+            try:
+                if not await el.is_visible():
+                    continue
+                text = " ".join((await el.text_content() or "").split()).strip()
+                if text and text not in messages:
+                    messages.append(text[:200])
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return messages
+
+
 async def is_logged_in(page: Page) -> bool:
     """Check if the current session is authenticated."""
     await page.goto(FEED_URL, wait_until="domcontentloaded", timeout=15000)
@@ -54,21 +79,29 @@ async def login(page: Page, config: Config) -> bool:
     await page.goto(LOGIN_URL, wait_until="domcontentloaded")
     await random_delay(1.0, 2.5)
 
-    # Fill email
-    email_input = page.locator("#username")
-    await email_input.fill("")
-    await email_input.type(email, delay=random.randint(50, 150))
-    await random_delay(0.5, 1.5)
+    # Try scripted credential entry. LinkedIn frequently serves a variant page
+    # (account picker, consent wall, challenge) with no #username field — if the
+    # form isn't there quickly, fall back to manual login rather than hanging.
+    try:
+        email_input = page.locator("#username")
+        await email_input.wait_for(state="visible", timeout=12000)
+        await email_input.fill("")
+        await email_input.type(email, delay=random.randint(50, 150))
+        await random_delay(0.5, 1.5)
 
-    # Fill password
-    password_input = page.locator("#password")
-    await password_input.fill("")
-    await password_input.type(password, delay=random.randint(50, 150))
-    await random_delay(0.5, 1.0)
+        password_input = page.locator("#password")
+        await password_input.fill("")
+        await password_input.type(password, delay=random.randint(50, 150))
+        await random_delay(0.5, 1.0)
 
-    # Click sign in
-    await page.locator('button[type="submit"]').click()
-    await random_delay(3.0, 6.0)
+        await page.locator('button[type="submit"]').click()
+        await random_delay(3.0, 6.0)
+    except Exception as e:
+        log.warning("auth.form_not_scriptable", error=str(e)[:120])
+
+    # Surface any red validation/error banners the login page shows
+    for err in await _read_login_errors(page):
+        log.warning("auth.login_error_message", message=err)
 
     # Check for security checkpoint (CAPTCHA, verification)
     if await detect_captcha(page):
@@ -77,13 +110,58 @@ async def login(page: Page, config: Config) -> bool:
         if not resolved:
             log.error("auth.checkpoint_unresolved")
             return False
-        # After CAPTCHA resolution, wait briefly for redirect
         await random_delay(2.0, 4.0)
 
     # Verify we landed on feed
     if "/feed" in page.url:
         log.info("auth.login_success")
         return True
+
+    # ── Manual-login fallback ──
+    # Scripted login didn't land us on the feed. Leave the (headed) browser open
+    # and poll for the user to finish logging in by hand — enter credentials,
+    # solve any CAPTCHA / 2FA — up to the configured captcha timeout.
+    timeout_s = int(config.settings.get("captcha", {}).get("timeout", 300))
+
+    # Best-effort: if the page offers Google SSO (common when the account is
+    # linked to Google), surface the Google account picker to speed up the
+    # one-time manual sign-in. Completion is still done by the user.
+    try:
+        google_btn = page.locator(
+            'button:has-text("Continue with Google"), '
+            'button:has-text("Sign in with Google"), '
+            'a:has-text("Continue with Google"), '
+            '[aria-label*="Google"]'
+        )
+        if await google_btn.count() > 0 and await google_btn.first.is_visible():
+            log.info("auth.clicking_google_sso")
+            await google_btn.first.click()
+            await random_delay(2.0, 4.0)
+    except Exception as e:
+        log.debug("auth.google_sso_click_failed", error=str(e)[:100])
+
+    log.warning(
+        "auth.manual_login_required",
+        msg=f"Please finish signing in to LinkedIn in the open Chrome window "
+            f"(e.g. 'Continue with Google'); waiting up to {timeout_s}s.",
+    )
+    waited = 0
+    poll = 5
+    while waited < timeout_s:
+        await random_delay(float(poll), float(poll))
+        waited += poll
+        try:
+            if "/feed" in page.url:
+                log.info("auth.login_success", via="manual")
+                return True
+            # Nudge to the feed to confirm an established session
+            if await is_logged_in(page):
+                log.info("auth.login_success", via="manual_session")
+                return True
+        except Exception:
+            pass
+        if waited % 30 == 0:
+            log.info("auth.waiting_for_manual_login", waited=waited, timeout=timeout_s)
 
     log.error("auth.login_failed", url=page.url)
     return False

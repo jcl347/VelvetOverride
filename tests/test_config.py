@@ -71,3 +71,19 @@ def test_config_properties(tmp_config_dir):
     assert isinstance(config.browser, dict)
     assert config.llm["field_model"] == "claude-sonnet-4-6"
     assert config.technology_experience["python"] == 3
+
+
+def test_local_yaml_overrides_committed(tmp_path):
+    """profile.local.yaml (gitignored real data) must win over profile.yaml."""
+    from velvetoverride.utils.config import _load_local_first
+    (tmp_path / "profile.yaml").write_text("personal:\n  first_name: Placeholder\n", encoding="utf-8")
+    (tmp_path / "profile.local.yaml").write_text("personal:\n  first_name: Real\n", encoding="utf-8")
+    data = _load_local_first(tmp_path, "profile")
+    assert data["personal"]["first_name"] == "Real"
+
+
+def test_falls_back_to_committed_when_no_local(tmp_path):
+    from velvetoverride.utils.config import _load_local_first
+    (tmp_path / "answers.yaml").write_text("yes_no: {}\n", encoding="utf-8")
+    data = _load_local_first(tmp_path, "answers")
+    assert "yes_no" in data

@@ -26,15 +26,18 @@ class FormField:
     current_value: str = ""
 
 
-async def detect_form_fields(page: Page) -> list[FormField]:
-    """Scan the current Easy Apply form step and detect all input fields.
+async def detect_form_fields(page: Page, scope=None) -> list[FormField]:
+    """Scan a form and detect all input fields.
 
-    Returns a list of FormField objects describing each field.
+    ``scope`` optionally restricts scanning to a container (e.g. the Easy Apply
+    modal) so we don't pick up unrelated page chrome like "Set alert" toggles or
+    job-alert switches. Label resolution still uses the full ``page``.
     """
     fields: list[FormField] = []
+    root = scope if scope is not None else page
 
     # --- Text inputs ---
-    text_inputs = page.locator(
+    text_inputs = root.locator(
         'input[type="text"], '
         'input:not([type]), '
         'input[type="email"], '
@@ -56,7 +59,7 @@ async def detect_form_fields(page: Page) -> list[FormField]:
         ))
 
     # --- Numeric inputs ---
-    num_inputs = page.locator('input[type="number"]')
+    num_inputs = root.locator('input[type="number"]')
     for i in range(await num_inputs.count()):
         inp = num_inputs.nth(i)
         if not await inp.is_visible():
@@ -72,7 +75,7 @@ async def detect_form_fields(page: Page) -> list[FormField]:
         ))
 
     # --- Textareas ---
-    textareas = page.locator("textarea")
+    textareas = root.locator("textarea")
     for i in range(await textareas.count()):
         ta = textareas.nth(i)
         if not await ta.is_visible():
@@ -88,7 +91,7 @@ async def detect_form_fields(page: Page) -> list[FormField]:
         ))
 
     # --- Selects (dropdowns) ---
-    selects = page.locator("select")
+    selects = root.locator("select")
     for i in range(await selects.count()):
         sel = selects.nth(i)
         if not await sel.is_visible():
@@ -104,11 +107,11 @@ async def detect_form_fields(page: Page) -> list[FormField]:
         ))
 
     # --- Radio button groups ---
-    radio_groups = await _detect_radio_groups(page)
+    radio_groups = await _detect_radio_groups(root, page)
     fields.extend(radio_groups)
 
     # --- Checkboxes ---
-    checkboxes = page.locator('input[type="checkbox"]')
+    checkboxes = root.locator('input[type="checkbox"]')
     for i in range(await checkboxes.count()):
         cb = checkboxes.nth(i)
         if not await cb.is_visible():
@@ -122,7 +125,7 @@ async def detect_form_fields(page: Page) -> list[FormField]:
         ))
 
     # --- File upload ---
-    file_inputs = page.locator('input[type="file"]')
+    file_inputs = root.locator('input[type="file"]')
     for i in range(await file_inputs.count()):
         fi = file_inputs.nth(i)
         label = await _get_field_label(fi, page)
@@ -196,11 +199,11 @@ async def _get_select_options(select: Locator) -> list[str]:
     return texts
 
 
-async def _detect_radio_groups(page: Page) -> list[FormField]:
+async def _detect_radio_groups(root, page: Page) -> list[FormField]:
     """Detect radio button groups and return them as single fields."""
     groups: dict[str, FormField] = {}
 
-    radios = page.locator('input[type="radio"]')
+    radios = root.locator('input[type="radio"]')
     for i in range(await radios.count()):
         radio = radios.nth(i)
         if not await radio.is_visible():

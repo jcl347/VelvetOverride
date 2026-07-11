@@ -2,8 +2,9 @@
 bot:
   # Dry-run mode: fill forms but do NOT submit. Use for calibration.
   dry_run: true
-  # Max applications per session (stay conservative to avoid detection)
-  max_applications: 25
+  # Max applications per session. Kept low for a small daily cadence
+  # (scheduled at 9am PST) and to stay well under detection thresholds.
+  max_applications: 5
   # Seconds to wait between applications (random within range)
   delay_min: 5
   delay_max: 18
@@ -13,25 +14,53 @@ bot:
   # Capture a screenshot at each form step (for human review)
   capture_screenshots: true
   screenshots_dir: "screenshots"
+  # ── Beyond Easy Apply ──
+  # When a job is NOT Easy Apply, follow the "Apply" button to the company's
+  # site (Workday/Greenhouse/Lever/...) and navigate it dynamically with the
+  # LLM instead of skipping. Set false to only do LinkedIn Easy Apply.
+  external_apply: true
+  # Max pages to walk on an external application before giving up
+  external_max_pages: 8
+  # Easy Apply form walking: how many steps before giving up, and how many
+  # times to retry a step that isn't advancing (red validation error) before
+  # recording the error and moving on to the next job.
+  max_form_steps: 20
+  max_stuck_retries: 4
 
 # ─── Job Search Filters ────────────────────────────────────────
 search:
+  # Each keyword is searched SEPARATELY (its own LinkedIn query), then
+  # results are merged and de-duplicated. Add/remove target roles here.
   keywords:
+    - "Data Scientist"
     - "Software Engineer"
-    - "Backend Engineer"
+    - "Software Developer"
+    - "AI Engineer"
+    - "Machine Learning Engineer"
+    - "Algorithm Engineer"
+    - "Data Engineer"
   locations:
-    - "United States"
+    - "Seattle, Washington, United States"
   # Filter to Easy Apply only
   easy_apply_only: true
+  # Sort newest-first so 24h results surface reliably
+  sort_by: "date"
+  # How many result pages to walk per keyword (the list is scrolled fully on
+  # each page before paginating). Higher = deeper coverage when the first
+  # page is mostly jobs we've already applied to.
+  max_pages: 5
   # Experience levels: internship, entry_level, associate, mid_senior, director, executive
   experience_levels:
-    - "entry_level"
-    - "associate"
     - "mid_senior"
+    - "director"
   # Date posted: any, past_month, past_week, past_24h
-  date_posted: "past_week"
-  # Remote filter: on_site, remote, hybrid
+  # Set to 24h so the bot only applies to fresh postings.
+  date_posted: "past_24h"
+  # Remote filter: on_site, remote, hybrid.
+  # "Remote or in Seattle" — location above is Seattle, so on_site/hybrid are
+  # Seattle-based; remote adds work-from-anywhere roles.
   remote:
+    - "on_site"
     - "remote"
     - "hybrid"
   # Job types: full_time, part_time, contract, temporary, internship
@@ -46,6 +75,21 @@ search:
     - "Revature"
   # Minimum job match score (0-100) to proceed with application
   min_match_score: 40
+
+# ─── Experience Fit (ChatGPT) ─────────────────────────────────
+# Before applying, ChatGPT compares the job's seniority + hard requirements
+# against your REAL titles, years, and skills — the honest "am I actually a
+# lead?" check. The verdict is recorded on every application and shown on the
+# dashboard.
+#
+# By default nothing is skipped (min_score: 0, skip_recommendations: []) so you
+# can review its judgement first. To act on it:
+#   min_score: 40                     -> skip anything scoring below 40
+#   skip_recommendations: ["skip"]    -> skip roles it deems a clear mismatch
+fit:
+  enabled: true
+  min_score: 0
+  skip_recommendations: []
 
 # ─── Salary Filtering ─────────────────────────────────────────
 # Filter jobs by extracted salary range. Jobs without salary info
@@ -62,8 +106,9 @@ captcha:
   strategy: "manual"
   # API key for 2captcha or capsolver (also reads CAPTCHA_API_KEY env var)
   api_key: null
-  # Timeout in seconds to wait for CAPTCHA resolution
-  timeout: 300
+  # Timeout in seconds to wait for CAPTCHA resolution AND for one-time manual
+  # login (e.g. "Continue with Google"). Generous so 2FA has time.
+  timeout: 600
 
 # ─── Browser Configuration ─────────────────────────────────────
 browser:
@@ -76,17 +121,34 @@ browser:
   viewport: null
   # Slow-mo milliseconds added to every action (adds human feel)
   slow_mo: 50
+  # Keep the browser/LinkedIn window open after the run finishes (interactive
+  # use). The scheduled daily task passes --no-keep-open so it exits cleanly.
+  keep_open: true
 
 # ─── LLM Configuration ─────────────────────────────────────────
+# Provider: "openai" (ChatGPT, default) or "anthropic".
+#
+# FREE TOKEN SHARING (ChatGPT): OpenAI grants complimentary daily tokens on
+# API traffic you share with them, on eligible models only:
+#   • Mini models (gpt-4.1-mini/-nano, gpt-4o-mini, gpt-5-mini/-nano):
+#       ~2.5M tokens/day (tiers 1-2), up to 10M/day higher tiers.
+#   • Standard models (gpt-4.1, gpt-4o, gpt-5, o-series):
+#       ~250K tokens/day (tiers 1-2), up to 1M/day higher tiers.
+# To activate: be Usage tier 1+, and enable sharing at
+#   https://platform.openai.com/settings/organization/data-controls/sharing
+# The models below are all eligible. Field Q&A (the high-volume path) uses a
+# mini model to stay inside the generous free bucket; resume tailoring uses a
+# standard model for quality but is low-volume (a few calls per job).
 llm:
-  # Model for fast field Q&A (cheaper, faster)
-  field_model: "claude-sonnet-4-6"
-  # Model for resume tailoring and complex reasoning
-  resume_model: "claude-sonnet-4-6"
-  # Max tokens for field answers
-  field_max_tokens: 300
+  provider: "openai"
+  # Model for high-volume field Q&A + keyword/bullet scoring (mini = big free bucket)
+  field_model: "gpt-4.1-mini"
+  # Model for resume summary tailoring (standard model, low call volume)
+  resume_model: "gpt-4.1"
+  # Max tokens for field answers (kept small — answers are short)
+  field_max_tokens: 200
   # Max tokens for resume tailoring
-  resume_max_tokens: 4096
+  resume_max_tokens: 600
 
 # ─── Resume Configuration ──────────────────────────────────────
 resume:
@@ -96,6 +158,15 @@ resume:
   output_format: "html"
   # Target ATS keyword coverage (0.0 - 1.0)
   target_keyword_coverage: 0.70
+  # ── Tailoring guardrails ──
+  # Bullet text is ALWAYS used verbatim (never rewritten by the LLM). Only the
+  # professional summary is keyword-aligned per job. These two settings control
+  # how aggressively experience bullets are re-ordered / trimmed:
+  #   reorder_bullets: true  → surface the most JD-relevant bullets first
+  #   max_bullets_per_job: null → keep every bullet (template shows the top ones)
+  # Bullet TEXT is never rewritten — only ordered — so impacts stay truthful.
+  reorder_bullets: true
+  max_bullets_per_job: null
 
 # ─── Tracking / Database ───────────────────────────────────────
 tracking:

@@ -3,42 +3,102 @@
 Automated LinkedIn job application bot with AI-powered form filling and resume tailoring.
 
 VelvetOverride searches LinkedIn for target roles, navigates Easy Apply forms, answers
-questions using a hybrid config + Claude AI approach, generates per-job tailored resumes,
-and tracks every application in a local SQLite database for human review.
+questions using a hybrid config + AI approach (OpenAI/ChatGPT by default, Claude optional),
+generates per-job tailored resumes, and tracks every application in a local SQLite database
+with a localhost web dashboard for human review.
 
 ## Features
 
 - **7-type form field detection** — text, numeric, radio, dropdown, checkbox, file upload, textarea
-- **5-tier hybrid field solver** — learned answers → YAML config → profile data → EEO handler → Claude LLM
-- **Per-job resume tailoring** — keyword extraction from JDs, bullet point ranking, summary rewriting, ATS scoring
+- **5-tier hybrid field solver** — learned answers → YAML config → profile data → EEO handler → LLM
+- **OpenAI (ChatGPT) by default** — provider-agnostic LLM layer; tuned for OpenAI's free daily token-sharing bucket
+- **Token usage tracking** — every run records tokens + estimated cost; `token-test` estimates use before you run
+- **Per-job resume tailoring** — keyword alignment only; experience bullets & impact metrics stay verbatim
+- **Robust de-duplication** — never re-applies to the same job by canonical LinkedIn **Job ID**, normalized URL, or fuzzy title+company
+- **Multi-role search** — each target role (Data Scientist, Software Engineer, AI Engineer, ML Engineer) is searched separately and merged
+- **24-hour recency** — applies to fresh postings, sorted newest-first
 - **Answer memory** — learns from human corrections, converges toward zero API cost over time
 - **Job match scoring** — applies to best-fit jobs first by scoring JDs against your skill profile
-- **Fuzzy duplicate detection** — catches reposted jobs with slightly different titles
-- **Anti-detection** — Patchright (undetected Playwright), persistent Chrome sessions, human-like timing, activity diversification
-- **Salary range extraction** — regex-based salary parsing from job descriptions with annual/hourly normalization
-- **Salary band filtering** — only apply to jobs within your target compensation range (CLI or config)
+- **Anti-detection** — Patchright (undetected Playwright), persistent Chrome sessions, human-like timing
+- **Salary extraction + band filtering** — regex salary parsing, annual/hourly normalization, target-range filter
 - **CAPTCHA handling** — 3 strategies: manual (VNC), 2Captcha API, CapSolver API
+- **Error tracking** — errors are recorded per run and surfaced in the dashboard and `errors` CLI
+- **Localhost dashboard** — Flask web UI showing applications, runs, errors, and token usage
+- **Daily scheduling** — one-command Windows Task Scheduler setup for a small 9 AM PST run
 - **Dry-run mode** — fills forms without submitting for safe calibration
-- **Full tracking** — SQLite database with CSV/JSON export and a human review queue
 
-## Quick Start (Local)
+## Setup
+
+### 1. Install
 
 ```bash
-# Install
-pip install -e ".[dev]"
-patchright install chrome
-
-# Configure
-cp config/.env.example config/.env
-# Edit config/.env — add LinkedIn credentials + Anthropic API key
-# Edit config/profile.yaml — your resume data
-# Edit config/answers.yaml — your predetermined answers
-# Edit config/settings.yaml — target roles, locations, filters
-
-# Run
-velvetoverride run --dry-run    # Test without submitting
-velvetoverride run --live       # Submit applications
+git clone https://github.com/<you>/VelvetOverride.git && cd VelvetOverride
+pip install -e ".[dev]"      # Python 3.11+
+patchright install chrome    # real Chrome for stealth
 ```
+
+### 2. Secrets (`config/.env` — gitignored)
+
+```bash
+cp config/.env.example config/.env
+```
+
+Edit `config/.env`:
+
+```ini
+LINKEDIN_EMAIL=you@example.com
+LINKEDIN_PASSWORD=your_password        # (only used if not signing in via Google SSO)
+OPENAI_API_KEY=sk-proj-...             # get one at https://platform.openai.com/api-keys
+```
+
+> If your LinkedIn uses **Google/SSO**, leave the password blank — on the first run the
+> bot opens Chrome and waits for you to sign in manually. The session then persists
+> (a real Chrome profile in `browser_data/`), so later runs log in automatically.
+
+### 3. Your profile & answers (kept OUT of git)
+
+Personal data lives in `*.local.yaml` files, which are **gitignored**. The committed
+`profile.yaml` / `answers.yaml` are safe placeholders. Copy and edit the local copies:
+
+```bash
+cp config/profile.yaml config/profile.local.yaml    # your experience, skills, projects
+cp config/answers.yaml config/answers.local.yaml    # your predetermined form answers
+```
+
+Edit `config/profile.local.yaml` — name, contact, experience (each bullet tagged with
+`skills:`), education, projects, and `technology_experience` (years per tech). The loader
+automatically prefers `*.local.yaml` when present.
+
+### 4. Target roles & locations (`config/settings.yaml`)
+
+Set `search.keywords` (each role is searched separately) and `search.locations`, or pass
+them on the CLI (see below). Tune `bot.max_applications`, salary band, and the `fit:` block.
+
+### 5. Estimate token use, then run
+
+```bash
+velvetoverride token-test -n 10   # measures tokens/job against sample JDs (no LinkedIn)
+
+velvetoverride run --dry-run      # fills forms but does NOT submit — calibrate first
+velvetoverride run --live         # submit applications
+
+velvetoverride dashboard          # → http://127.0.0.1:5000  (progress + fit + errors)
+```
+
+> ⚠️ **First live run:** watch the Chrome window that opens and complete any LinkedIn
+> login / CAPTCHA / 2FA. After that the session is remembered.
+
+### Free token sharing (ChatGPT)
+
+OpenAI grants **complimentary daily tokens** on API traffic you share with them, on
+eligible models. This bot is tuned to fit inside that free bucket:
+
+- High-volume field Q&A uses a **mini model** (`gpt-4.1-mini`) — ~2.5M free tokens/day (tier 1-2).
+- Resume tailoring uses `gpt-4.1` — ~250K free tokens/day.
+- At 5 applications/day the bot uses **~10K tokens/day** — about **0.4%** of the free mini bucket.
+
+To activate: be Usage tier 1+, then enable sharing at
+<https://platform.openai.com/settings/organization/data-controls/sharing>.
 
 ## CLI Commands
 
@@ -46,15 +106,34 @@ velvetoverride run --live       # Submit applications
 velvetoverride run [OPTIONS]                  Run the application bot
   --dry-run / --live                          Override dry_run setting
   --max-apps N                                Max applications this run (overrides settings.yaml)
-  --min-salary N                              Minimum annual salary filter (e.g. 100000)
-  --max-salary N                              Maximum annual salary filter (e.g. 200000)
+  --min-salary N / --max-salary N             Salary band filter (annual)
+  -k, --keyword "Role"                        Target role to search (repeatable; overrides config)
+  -l, --location "City/Remote"                Location to search (repeatable; overrides config)
+  --loop [--loop-delay N] [--max-loops N]     Re-run continuously until stopped
   -v                                          Verbose/debug logging
 
-velvetoverride stats                          Show application statistics
+velvetoverride token-test [-n N]              Estimate token use on N sample jobs (no LinkedIn)
+velvetoverride dashboard [--port P]           Launch the localhost tracking dashboard
+velvetoverride stats                          Show application statistics (incl. tokens/errors)
+velvetoverride runs [--limit N]               Show recent bot run history
+velvetoverride errors [--limit N]             Show recorded errors from runs
 velvetoverride export [--format csv|json]     Export tracking data
-velvetoverride review                         Show LLM-answered questions needing review
+velvetoverride review [--approve]             Review / approve LLM-answered questions
 velvetoverride tailor TITLE COMPANY JD_FILE   Generate a tailored resume (no apply)
 ```
+
+### Daily 9 AM PST run (Windows)
+
+```powershell
+# Registers a per-user scheduled task at the local equivalent of 9:00 AM Pacific
+powershell -ExecutionPolicy Bypass -File scripts\register_schedule.ps1
+
+# Test it immediately
+Start-ScheduledTask -TaskName "VelvetOverride Daily"
+```
+
+The task runs `scripts\run_daily.ps1`, which respects `settings.yaml` (dry-run stays on
+until you flip `bot.dry_run: false`) and logs to `data/logs/`.
 
 ### Examples
 
@@ -62,11 +141,14 @@ velvetoverride tailor TITLE COMPANY JD_FILE   Generate a tailored resume (no app
 # Apply to max 10 jobs paying $120K-$200K
 velvetoverride run --live --max-apps 10 --min-salary 120000 --max-salary 200000
 
-# Dry-run with salary filter from settings.yaml
-velvetoverride run --dry-run
+# Override target roles + locations from the CLI (repeat the flags)
+velvetoverride run --live -k "AI Engineer" -k "ML Engineer" -l "Seattle" -l "Remote"
 
-# Quick 5-application test run
-velvetoverride run --live --max-apps 5 -v
+# Run continuously, re-checking for fresh postings every 30 min
+velvetoverride run --live --loop --loop-delay 1800
+
+# Dry-run with everything from settings.yaml
+velvetoverride run --dry-run
 ```
 
 ---
@@ -160,7 +242,7 @@ Set these values in `config/.env`:
 ```
 LINKEDIN_EMAIL=your_real_email@example.com
 LINKEDIN_PASSWORD=your_real_password
-ANTHROPIC_API_KEY=sk-ant-your-key-here
+OPENAI_API_KEY=sk-proj-your-key-here
 ```
 
 Then customize your profile and preferences:
@@ -174,7 +256,7 @@ nano config/settings.yaml     # Target job roles, locations, filters
 
 ```bash
 pytest tests/ -v
-# All 57 tests should pass
+# All 88 tests should pass
 ```
 
 ---
@@ -483,8 +565,11 @@ journalctl -u velvetoverride.service -f
 | `captcha.timeout` | Seconds to wait for CAPTCHA resolution (default: 300) |
 | `browser.channel` | `chrome` (real Chrome — stealthier) |
 | `browser.headless` | `false` for VNC/desktop; Xvfb handles "headless" |
-| `llm.field_model` | Claude model for field Q&A (default: claude-sonnet-4-6) |
-| `llm.resume_model` | Claude model for resume tailoring |
+| `llm.provider` | `openai` (ChatGPT, default) or `anthropic` |
+| `llm.field_model` | Model for field Q&A (default: `gpt-4.1-mini`) |
+| `llm.resume_model` | Model for resume tailoring (default: `gpt-4.1`) |
+| `resume.reorder_bullets` | `false` = keep original bullet order (impacts stay in place) |
+| `resume.max_bullets_per_job` | `null` = keep every bullet (nothing dropped) |
 | `resume.target_keyword_coverage` | ATS keyword target (default: 0.70 = 70%) |
 
 ### config/profile.yaml
@@ -516,15 +601,15 @@ Predetermined answers for common Easy Apply questions:
 | **EC2 t3.large** (on-demand) | ~$0.083/hr = ~$60/month (if running 24/7) |
 | **EC2 t3.large** (spot) | ~$0.025/hr = ~$18/month |
 | **GCP e2-standard-2** | ~$0.067/hr = ~$49/month |
-| **Claude Sonnet API** (field Q&A) | ~$0.003 per field (most fields use config — free) |
-| **Claude Sonnet API** (resume tailoring) | ~$0.01-0.03 per resume |
-| **Typical session** (25 apps) | ~$0.50-1.50 in API costs |
+| **OpenAI API** (measured, `token-test`) | ~2,100 tokens/job ≈ $0.002/job at billed rates |
+| **Typical day** (5 apps) | ~10K tokens ≈ **$0** if free token-sharing is enabled |
+| **Monthly** (5 apps/day) | ~314K tokens — well inside the ~2.5M/day free mini bucket |
 
 To minimize costs:
-- Use **spot instances** (EC2) or **preemptible VMs** (GCP) for ~70% savings
+- **Enable free token sharing** (see above) — at this volume the LLM is effectively free
 - Fill out `answers.yaml` thoroughly — the more questions handled by config, the fewer API calls
 - The **answer memory system** reduces API costs over time as it learns
-- Run only during business hours and shut down the instance otherwise
+- Use **spot instances** (EC2) or **preemptible VMs** (GCP) for ~70% savings on cloud hosting
 
 ---
 
@@ -536,7 +621,8 @@ To minimize costs:
 | WeasyPrint import error | Install system deps: `apt install libpango-1.0-0 libharfbuzz0b libpangoft2-1.0-0 libharfbuzz-subset0` |
 | "Looks like you launched a headed browser without having a XServer running" | Start Xvfb: `Xvfb :99 -screen 0 1920x1080x24 & export DISPLAY=:99` |
 | LinkedIn security checkpoint / CAPTCHA | Set `captcha.strategy` in settings.yaml. `manual` (default) waits for you to solve via VNC. `2captcha` or `capsolver` auto-solve via API. Set `CAPTCHA_API_KEY` in `.env` for API strategies. |
-| `ANTHROPIC_API_KEY` not set | Add it to `config/.env`. The bot works without it but can't handle unknown questions or tailor resumes. |
+| `OPENAI_API_KEY` not set | Add it to `config/.env`. The bot works without it but can't handle unknown questions or tailor resumes. |
+| Free daily tokens not applying | Enable data sharing at platform.openai.com data controls, and confirm you're Usage tier 1+. Only eligible models (gpt-4.1/-mini, gpt-4o/-mini, gpt-5 family, o-series) qualify. |
 | Chrome crashes with `--no-sandbox` error | Run as non-root user, or add `--no-sandbox` to browser args in `engine.py` |
 | VNC black screen | Restart VNC: `vncserver -kill :1 && vncserver -geometry 1920x1080 -depth 24 :1` |
 

@@ -2,9 +2,16 @@
 .env
 config/.env
 
-# Generated data
+# Personal data — real profile/answers live in *.local.yaml (gitignored).
+# The committed profile.yaml / answers.yaml are safe placeholders.
+config/*.local.yaml
+
+# Generated data (DB, tailored resumes, exports, logs — all runtime artifacts)
+data/
 data/applications.db
 data/resumes/
+data/*.csv
+data/*.json
 
 # Python
 __pycache__/

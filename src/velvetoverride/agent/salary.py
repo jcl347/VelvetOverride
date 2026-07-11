@@ -35,6 +35,22 @@ SALARY_PATTERNS = [
         r"(?:per\s+hour|/\s*h(?:ou)?r|hourly|an?\s+hour)",
         re.IGNORECASE,
     ),
+    # $8,000 - $10,000/month or $8,000 - $10,000 per month
+    re.compile(
+        r"\$\s*([\d,]+)\s*(?:[-–—to]+)\s*\$?\s*([\d,]+)\s*"
+        r"(?:per\s+month|/\s*mo(?:nth)?|monthly|a\s+month)",
+        re.IGNORECASE,
+    ),
+    # Single monthly: $9,500 per month / pays $7,500 monthly
+    re.compile(
+        r"\$\s*([\d,]+)\s*(?:per\s+month|/\s*mo(?:nth)?|monthly|a\s+month)",
+        re.IGNORECASE,
+    ),
+    # Single hourly: $100/hour / $85 per hour
+    re.compile(
+        r"\$\s*(\d+(?:\.\d+)?)\s*(?:per\s+hour|/\s*h(?:ou)?r|hourly|an?\s+hour)",
+        re.IGNORECASE,
+    ),
     # Single salary: $150,000 or $150K
     re.compile(
         r"(?:up\s+to|starting\s+at|from|base[:\s]*)\s*\$\s*(\d[\d,]*)\s*[kK]?",
@@ -47,25 +63,53 @@ HOURLY_INDICATORS = re.compile(
     r"per\s+hour|/\s*h(?:ou)?r|hourly|an?\s+hour", re.IGNORECASE
 )
 
+# Patterns that indicate monthly rates
+MONTHLY_INDICATORS = re.compile(
+    r"per\s+month|/\s*mo(?:nth)?\b|monthly|a\s+month", re.IGNORECASE
+)
+
+HOURS_PER_YEAR = 2080
+MONTHS_PER_YEAR = 12
+
 
 @dataclass
 class SalaryRange:
-    """Extracted salary range from a job description."""
+    """Extracted salary range from a job description.
+
+    Values are stored in their native period (hourly / monthly / yearly) and
+    annualized on demand so filtering always compares like-for-like.
+    """
 
     min_salary: int
     max_salary: int
     is_hourly: bool = False
+    is_monthly: bool = False
     raw_text: str = ""
 
     @property
+    def period(self) -> str:
+        if self.is_hourly:
+            return "hourly"
+        if self.is_monthly:
+            return "monthly"
+        return "yearly"
+
+    def _annualize(self, value: int) -> int:
+        if self.is_hourly:
+            return value * HOURS_PER_YEAR
+        if self.is_monthly:
+            return value * MONTHS_PER_YEAR
+        return value
+
+    @property
     def annual_min(self) -> int:
-        """Annualized minimum (assumes 2,080 hours/year for hourly)."""
-        return self.min_salary * 2080 if self.is_hourly else self.min_salary
+        """Annualized minimum (hourly ×2080, monthly ×12)."""
+        return self._annualize(self.min_salary)
 
     @property
     def annual_max(self) -> int:
         """Annualized maximum."""
-        return self.max_salary * 2080 if self.is_hourly else self.max_salary
+        return self._annualize(self.max_salary)
 
     @property
     def midpoint(self) -> int:
@@ -74,7 +118,9 @@ class SalaryRange:
 
     def __str__(self) -> str:
         if self.is_hourly:
-            return f"${self.min_salary}/hr - ${self.max_salary}/hr (≈${self.annual_min:,}-${self.annual_max:,}/yr)"
+            return f"${self.min_salary}/hr - ${self.max_salary}/hr (~${self.annual_min:,}-${self.annual_max:,}/yr)"
+        if self.is_monthly:
+            return f"${self.min_salary:,}/mo - ${self.max_salary:,}/mo (~${self.annual_min:,}-${self.annual_max:,}/yr)"
         return f"${self.min_salary:,} - ${self.max_salary:,}"
 
 
@@ -111,8 +157,13 @@ def extract_salary(description: str) -> SalaryRange | None:
             else:
                 continue
 
-            # Detect if it's an hourly rate
-            is_hourly = bool(HOURLY_INDICATORS.search(raw_text))
+            # Detect the pay period from the match PLUS a trailing window, since
+            # the generic annual pattern captures the numbers but not a trailing
+            # "/month" or "per hour" suffix. Hourly takes priority, then monthly.
+            tail = description[match.end():match.end() + 20]
+            context = f"{raw_text} {tail}"
+            is_hourly = bool(HOURLY_INDICATORS.search(context))
+            is_monthly = not is_hourly and bool(MONTHLY_INDICATORS.search(context))
 
             # Handle K suffix (already handled by _parse_salary_value for "$120K" patterns)
             # But for the K-specific pattern, multiply by 1000
@@ -120,9 +171,13 @@ def extract_salary(description: str) -> SalaryRange | None:
                 min_sal *= 1000
                 max_sal *= 1000
 
-            # Sanity checks
+            # Sanity checks per period
             if is_hourly:
                 if min_sal < 10 or max_sal > 500:
+                    continue
+            elif is_monthly:
+                # Reasonable monthly pay band (~$1.2k–$100k/mo)
+                if min_sal < 1200 or max_sal > 100_000:
                     continue
             else:
                 if min_sal < 20000 or max_sal > 1_000_000:
@@ -136,6 +191,7 @@ def extract_salary(description: str) -> SalaryRange | None:
                 min_salary=min_sal,
                 max_salary=max_sal,
                 is_hourly=is_hourly,
+                is_monthly=is_monthly,
                 raw_text=raw_text.strip(),
             )
             log.debug("salary.extracted", salary=str(salary), raw=raw_text.strip())

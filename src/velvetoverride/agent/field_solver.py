@@ -70,10 +70,29 @@ class FieldSolver:
         if profile_answer is not None:
             return profile_answer, "profile", False
 
+        # ── Tier 4b: Location / work-arrangement preference (Seattle or Remote) ──
+        location_answer = self._check_location_preference(field)
+        if location_answer is not None:
+            return location_answer, "profile", False
+
         # ── Tier 5: EEO handling ──
         eeo_answer = self._check_eeo(field)
         if eeo_answer is not None:
             return eeo_answer, "config", False
+
+        # ── Tier 5a: Required consent/terms checkboxes must be ticked ──
+        # LinkedIn blocks the form with "Select checkbox to proceed" otherwise.
+        if field.field_type == FieldType.CHECKBOX:
+            log.debug("solver.checkbox_consent", label=field.label[:60])
+            return "Yes", "config", False
+
+        # ── Tier 5b: "Generally yes" default for unknown yes/no questions ──
+        # Config negatives (sponsorship, non-compete, prior employee) already
+        # matched above; anything still unresolved that is a yes/no field
+        # defaults to Yes per user preference.
+        yes_default = self._check_yes_no_default(field)
+        if yes_default is not None:
+            return yes_default, "config", True
 
         # ── Tier 6: LLM fallback ──
         if self._llm:
@@ -102,11 +121,18 @@ class FieldSolver:
                     return "Yes" if answer else "No"
                 return str(answer)
 
-        # Numeric questions (years of experience)
+        # Numeric questions (years of experience). If the technology isn't in
+        # the profile, return None so the LLM answers it honestly rather than
+        # emitting a blind default.
         numeric = self._answers.get("numeric", {})
         exp_patterns = numeric.get("experience_patterns", [])
         if any(p.lower() in label for p in exp_patterns):
-            return self._resolve_experience_years(label)
+            years = self._resolve_experience_years(label)
+            if years is not None:
+                return years
+            if numeric.get("llm_for_unknown_tech", True) and self._llm:
+                return None  # → Tier 6 LLM fallback
+            return str(self._config.technology_experience.get("default", 1))
 
         # Salary
         salary = numeric.get("salary", {})
@@ -163,6 +189,57 @@ class FieldSolver:
 
         return None
 
+    def _check_yes_no_default(self, field: FormField) -> str | None:
+        """Default unknown yes/no questions to 'Yes' (user preference).
+
+        Only fires for radio/dropdown fields whose options are essentially
+        Yes/No, so we don't put "Yes" into free-text or numeric fields.
+        """
+        if field.field_type not in (FieldType.RADIO, FieldType.DROPDOWN):
+            return None
+        options = field.options or []
+        if not options:
+            return None
+        opt_low = {o.strip().lower() for o in options}
+        yesno = {"yes", "no"}
+        # Options are a yes/no set (allow an extra "maybe"/blank)
+        if not (opt_low & yesno) or not opt_low.issubset(yesno | {"", "maybe", "n/a"}):
+            return None
+        for o in options:
+            if o.strip().lower() == "yes":
+                log.info("solver.yes_default", label=field.label)
+                return o
+        return None
+
+    def _check_location_preference(self, field: FormField) -> str | None:
+        """Answer location / work-arrangement questions with Seattle or Remote.
+
+        For text fields returns the city; for dropdown/radio picks the option
+        that matches Seattle, then Remote, then Washington.
+        """
+        label = field.label.lower()
+        location_kw = (
+            "preferred location", "work location", "which location", "office location",
+            "location preference", "where would you like", "desired location",
+            "work arrangement", "work model", "on-site or remote", "remote or",
+        )
+        if not any(k in label for k in location_kw):
+            return None
+
+        personal = self._config.personal
+        city = personal.get("city", "Seattle")
+
+        # For option-based fields, prefer Seattle, then Remote, then Washington
+        if field.field_type in (FieldType.DROPDOWN, FieldType.RADIO) and field.options:
+            for pref in ("seattle", "remote", "washington", "hybrid"):
+                for opt in field.options:
+                    if pref in opt.lower():
+                        return opt
+            return field.options[0]
+
+        # Free-text location field
+        return city
+
     def _check_eeo(self, field: FormField) -> str | None:
         """Handle EEO / voluntary self-identification questions."""
         label = field.label.lower()
@@ -190,19 +267,29 @@ class FieldSolver:
 
         return "Prefer not to say"
 
-    def _resolve_experience_years(self, label: str) -> str:
-        """Match a technology from the question to profile experience years."""
-        tech_exp = self._config.technology_experience
-        default = tech_exp.get("default", 1)
+    def _resolve_experience_years(self, label: str) -> str | None:
+        """Match a technology in the question to the profile's years.
 
+        Uses word-boundary matching (so "ml" doesn't match "HTML" and "ai"
+        doesn't match "email") and prefers the longest key ("machine learning"
+        over "ml"). Returns None when no technology matches, so the caller can
+        fall through to the LLM for an honest answer instead of guessing.
+        """
+        tech_exp = self._config.technology_experience
         label_lower = label.lower()
-        for tech, years in tech_exp.items():
-            if tech == "default":
-                continue
-            if tech.lower() in label_lower:
+
+        candidates = [(t, y) for t, y in tech_exp.items() if t != "default"]
+        # Longest key first: "machine learning" should win over "ml"
+        candidates.sort(key=lambda kv: len(kv[0]), reverse=True)
+
+        for tech, years in candidates:
+            pattern = r"\b" + re.escape(str(tech).lower()) + r"\b"
+            if re.search(pattern, label_lower):
+                log.debug("solver.years_matched", tech=tech, years=years, label=label[:60])
                 return str(years)
 
-        return str(default)
+        log.info("solver.years_unknown_tech", label=label[:80])
+        return None
 
     def _ask_llm(
         self,
@@ -262,6 +349,13 @@ class FieldSolver:
         if experience:
             latest = experience[0]
             parts.append(f"Current role: {latest.get('title', '')} at {latest.get('company', '')}")
+
+        # Years-per-technology so "how many years of X?" is answered from real
+        # data (and closely-related tech can be reasoned about honestly).
+        tech = self._config.technology_experience
+        if tech:
+            years = ", ".join(f"{k}: {v}" for k, v in tech.items() if k != "default")
+            parts.append(f"Years of experience per technology: {years}")
 
         return "\n".join(parts)
 

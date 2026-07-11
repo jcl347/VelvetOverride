@@ -45,9 +45,9 @@ class ResumeBuilder:
 
         html_content = template.render(**resume_data)
 
-        # Write intermediate HTML
+        # Write intermediate HTML (explicit UTF-8; Windows defaults to cp1252)
         html_path = self._output_dir / f"{filename}.html"
-        html_path.write_text(html_content)
+        html_path.write_text(html_content, encoding="utf-8")
 
         # Generate PDF from HTML
         pdf_path = self._output_dir / f"{filename}.pdf"
@@ -65,12 +65,39 @@ class ResumeBuilder:
             return str(html_path)
 
     def _html_to_pdf(self, html_content: str, output_path: Path) -> None:
-        """Convert HTML to PDF using WeasyPrint."""
+        """Convert HTML to PDF.
+
+        Tries WeasyPrint first (best fidelity, needs GTK system libs), then
+        xhtml2pdf (pure-Python, works everywhere incl. Windows with no system
+        deps). Raises if neither is available so the caller can fall back to HTML.
+        """
+        # Engine 1: WeasyPrint
         try:
             from weasyprint import HTML
-        except ImportError:
-            raise ImportError(
-                "WeasyPrint is required for PDF generation. "
-                "Install it with: pip install weasyprint"
-            )
-        HTML(string=html_content).write_pdf(str(output_path))
+
+            HTML(string=html_content).write_pdf(str(output_path))
+            return
+        except Exception as e:  # ImportError or GTK/runtime error
+            log.debug("resume.weasyprint_unavailable", error=str(e)[:120])
+
+        # Engine 2: xhtml2pdf (pure Python)
+        try:
+            from xhtml2pdf import pisa
+
+            # xhtml2pdf mangles raw non-ASCII into mojibake ("—" -> "â€”").
+            # Escaping to XML character refs ("&#8212;") renders correctly and
+            # also protects unicode in company names (e.g. "mani™").
+            safe_html = html_content.encode("ascii", "xmlcharrefreplace").decode("ascii")
+
+            with open(output_path, "wb") as f:
+                result = pisa.CreatePDF(src=safe_html, dest=f, encoding="utf-8")
+            if result.err:
+                raise RuntimeError(f"xhtml2pdf reported {result.err} errors")
+            log.debug("resume.pdf_engine", engine="xhtml2pdf")
+            return
+        except Exception as e:
+            log.debug("resume.xhtml2pdf_failed", error=str(e)[:120])
+
+        raise RuntimeError(
+            "No PDF engine available (install weasyprint or xhtml2pdf)."
+        )

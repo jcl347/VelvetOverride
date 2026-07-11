@@ -46,6 +46,7 @@ class ApplicationRecord:
     job_url: str
     job_title: str
     company: str
+    job_id: str = ""
     location: str = ""
     job_description: str = ""
     status: str = ApplicationStatus.APPLIED.value
@@ -57,6 +58,12 @@ class ApplicationRecord:
     salary_min: int | None = None
     salary_max: int | None = None
     salary_raw: str = ""
+    # ChatGPT's honest assessment of experience/seniority fit
+    fit_score: int | None = None
+    fit_seniority: str = ""      # under_qualified | match | over_qualified
+    fit_recommend: str = ""      # apply | stretch | skip
+    fit_reasoning: str = ""
+    fit_gaps: str = ""           # requirements not met, "; "-joined
     questions: list[QuestionRecord] = field(default_factory=list)
     id: int | None = None
 
@@ -68,6 +75,7 @@ class JobListing:
     url: str
     title: str
     company: str
+    job_id: str = ""
     location: str = ""
     description: str = ""
     posted_date: str = ""
@@ -77,3 +85,9 @@ class JobListing:
     salary_max: int | None = None
     salary_raw: str = ""
     skills_extracted: list[str] = field(default_factory=list)
+    # Populated by the LLM fit evaluation before applying
+    fit_score: int | None = None
+    fit_seniority: str = ""
+    fit_recommend: str = ""
+    fit_reasoning: str = ""
+    fit_gaps: str = ""

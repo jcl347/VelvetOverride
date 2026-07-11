@@ -152,9 +152,10 @@ VelvetOverride/
 │       │   ├── apply.py         # Multi-step Easy Apply form walker
 │       │   └── fields.py        # Form field detection (7 types), label extraction
 │       ├── agent/
-│       │   ├── llm.py           # Claude API client (Q&A, keyword extraction, tailoring)
+│       │   ├── llm.py           # Provider-agnostic LLM client (OpenAI default / Anthropic) + token usage
 │       │   ├── field_solver.py  # 5-tier hybrid solver (learned→config→profile→EEO→LLM)
-│       │   ├── resume_tailor.py # JD analysis → bullet ranking → summary rewrite → PDF
+│       │   ├── resume_tailor.py # JD analysis → bullet ranking → summary rewrite → PDF (guardrailed)
+│       │   ├── token_test.py    # Offline token-usage estimator (sample jobs → real LLM calls)
 │       │   └── salary.py        # Salary range extraction (regex) + filtering
 │       ├── resume/
 │       │   ├── builder.py       # Jinja2 → HTML → PDF (WeasyPrint) pipeline
@@ -162,21 +163,30 @@ VelvetOverride/
 │       │   └── templates/
 │       │       └── default.html.j2  # Professional ATS-friendly resume template
 │       ├── tracking/
-│       │   ├── database.py      # SQLite schema, CRUD, dedup, stats, review queue
-│       │   ├── models.py        # ApplicationRecord, QuestionRecord, JobListing, enums
+│       │   ├── database.py      # SQLite schema, CRUD, dedup (job_id), errors, tokens, stats
+│       │   ├── models.py        # ApplicationRecord, QuestionRecord, JobListing (job_id), enums
 │       │   └── export.py        # CSV/JSON/review-queue export
+│       ├── web/
+│       │   └── dashboard.py     # Flask localhost dashboard (apps, runs, errors, tokens)
 │       └── utils/
 │           ├── config.py        # YAML config loader, .env secrets, Config dataclass
+│           ├── urls.py          # LinkedIn job-ID extraction + URL normalization (dedup)
 │           └── logging.py       # structlog setup (console + JSON modes)
+├── scripts/
+│   ├── run_daily.ps1            # One daily run, logged to data/logs/
+│   └── register_schedule.ps1    # Register 9 AM PST Windows scheduled task
 ├── tests/
 │   ├── test_config.py           # Config loading (3 tests)
 │   ├── test_field_solver.py     # Hybrid field solver (18 tests)
 │   ├── test_resume.py           # Resume builder + ATS scorer (7 tests)
 │   ├── test_salary.py           # Salary extraction + filtering (20 tests)
 │   ├── test_search.py           # Search URL builder (6 tests)
-│   └── test_tracking.py         # SQLite database + run tracking + approvals (22 tests)
+│   ├── test_tracking.py         # SQLite database + run tracking + approvals (22 tests)
+│   ├── test_urls.py             # Job-ID extraction + URL normalization (7 tests)
+│   └── test_dedup_and_tracking.py  # job_id dedup, error log, token usage (12 tests)
 └── data/                        # (gitignored)
     ├── applications.db          # SQLite tracking database
+    ├── logs/                    # Per-run log files
     └── resumes/                 # Generated tailored resume PDFs
 ```
 
@@ -212,10 +222,11 @@ VelvetOverride/
 | Package Manager | **uv** | Fast, modern Python package management |
 | Browser Engine | **Patchright** (undetected Playwright) | Best-in-class anti-detection, Playwright API compatibility |
 | AI Agent Layer | **browser-use** (optional, for complex flows) | LLM-driven adaptive form navigation |
-| LLM Provider | **Anthropic Claude API** (Sonnet for speed, Opus for complex reasoning) | Strong instruction-following, tool use, long context for JD analysis |
+| LLM Provider | **OpenAI (ChatGPT) API** default (`gpt-4.1-mini` for field Q&A, `gpt-4.1` for tailoring); Anthropic optional | Provider-agnostic layer; OpenAI chosen for free daily token-sharing bucket |
 | Resume Templates | **Jinja2 + LaTeX** (`pdflatex`) or **Jinja2 + HTML** (`weasyprint`) | Separation of data/layout, ATS-friendly PDF output |
 | Resume Data | **YAML** | Human-readable, easy to maintain |
 | Database | **SQLite** (via `sqlite3` stdlib) | Zero-config, portable, sufficient for local tracking |
+| Web Dashboard | **Flask** | Localhost tracking UI (apps, runs, errors, tokens) |
 | Config | **YAML** + **python-dotenv** | Structured config + secure secret management |
 | Testing | **pytest** | Standard Python testing |
 | Logging | **structlog** | Structured JSON logging for debugging bot runs |
@@ -383,7 +394,7 @@ logic in the apply loop.
 
 - **Python 3.11+**
 - **Google Chrome** installed (the bot uses real Chrome, not Chromium)
-- **Anthropic API key** (for LLM features — optional but recommended)
+- **OpenAI (ChatGPT) API key** (for LLM features — optional but recommended; Anthropic also supported)
 
 ### Quick Start
 
@@ -397,7 +408,7 @@ patchright install chrome
 
 # 3. Configure your credentials
 cp config/.env.example config/.env
-# Edit config/.env with your LinkedIn credentials and Anthropic API key
+# Edit config/.env with your LinkedIn credentials and OPENAI_API_KEY
 
 # 4. Customize your profile
 # Edit config/profile.yaml with your real experience, skills, education
@@ -418,22 +429,34 @@ velvetoverride run [--dry-run|--live] [-v]   # Run the application bot
   --max-apps N                               # Max applications this run
   --min-salary N                             # Minimum annual salary (e.g. 100000)
   --max-salary N                             # Maximum annual salary (e.g. 200000)
-velvetoverride stats                         # Show enriched statistics (salary, sources, failures, runs)
+velvetoverride token-test [-n N]             # Estimate token use on N sample jobs (no LinkedIn)
+velvetoverride dashboard [--port P]          # Launch localhost tracking dashboard (default :5000)
+velvetoverride stats                         # Enriched statistics (salary, sources, failures, runs, tokens, errors)
 velvetoverride export [--format csv|json]    # Export tracking data (includes salary fields)
-velvetoverride review                        # Show questions needing review
-velvetoverride review --approve              # Interactively approve/correct answers (persists to YAML)
+velvetoverride review [--approve]            # Show / interactively approve LLM-answered questions
 velvetoverride runs [--limit N]              # Show recent bot run history
+velvetoverride errors [--limit N]            # Show recorded errors from runs
 velvetoverride tailor TITLE COMPANY JD_FILE  # Generate a tailored resume only
 ```
+
+### Daily scheduled run (Windows, 9 AM PST)
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\register_schedule.ps1  # register task
+Start-ScheduledTask -TaskName "VelvetOverride Daily"                     # test it now
+```
+
+The task computes the local-time equivalent of 9:00 AM Pacific and runs
+`scripts\run_daily.ps1`, which respects `settings.yaml` and logs to `data/logs/`.
 
 ### Configuration Files
 
 | File | Purpose |
 |---|---|
-| `config/settings.yaml` | Bot behavior, search filters, browser config, LLM models, rate limits |
+| `config/settings.yaml` | Bot behavior, search filters, browser config, LLM provider/models, rate limits |
 | `config/profile.yaml` | Your resume data — experience, skills, education, personal info |
 | `config/answers.yaml` | Predetermined answers for known question types + learned answers |
-| `config/.env` | Secrets — LinkedIn credentials, Anthropic API key, proxy URL |
+| `config/.env` | Secrets — LinkedIn credentials, **OPENAI_API_KEY**, proxy URL |
 
 ### Where to Run
 
@@ -553,6 +576,69 @@ section below for the full analysis.
 
 **Test suite: 70 tests** covering config (3), field solver (18), resume (7),
 salary (20), search (6), tracking + runs + approvals (22 — up from 6).
+
+### Phase 8: OpenAI (ChatGPT), Robust Dedup, Dashboard & Scheduling (DONE)
+
+Migrated the LLM layer to OpenAI, hardened de-duplication, added a localhost
+tracking dashboard, and set up a small daily scheduled run.
+
+**LLM provider migration (OpenAI / ChatGPT):**
+- `llm.py` is now provider-agnostic (`llm.provider: openai | anthropic`). OpenAI is
+  the default via `gpt-4.1-mini` (field Q&A) + `gpt-4.1` (resume tailoring).
+- Config reads `OPENAI_API_KEY`; `config.has_llm` gates on the active provider.
+- **Free token sharing:** models are chosen to fit OpenAI's complimentary daily
+  token bucket (mini models ~2.5M/day, standard ~250K/day at tier 1-2). Prompt
+  excerpts were trimmed and `field_max_tokens` lowered to keep usage tiny.
+- Every LLM call records token usage (`Usage` accumulator) with per-model cost
+  estimation; usage is persisted per run (`runs.prompt_tokens/…/est_cost_usd`).
+
+**Token-use evaluation:**
+- New `token-test` command + `agent/token_test.py` run the exact per-job LLM calls
+  against sample JDs (no LinkedIn) and report tokens/job + daily/monthly projection.
+- Measured: **~2,093 tokens/job** across 5 calls → at 5 apps/day ≈ 10.5K tokens/day
+  (~0.4% of the free mini bucket), ~$0.01/day at billed rates.
+
+**Robust de-duplication (never re-apply to the same job):**
+- `utils/urls.py` extracts the canonical LinkedIn **Job ID** and normalizes every
+  URL shape (`/jobs/view/<id>`, slug URLs, `currentJobId=`, relative, tracking params)
+  to one canonical form.
+- New `applications.job_id` column + index (with migration). `is_already_applied`
+  matches by job ID first, then normalized URL; fuzzy title+company remains as a
+  third layer. Scraper populates `job_id` and dedups across keyword searches.
+
+**Targeting & recency:**
+- Keywords are now searched **separately** (Data Scientist, Software Engineer, AI
+  Engineer, Machine Learning Engineer) and merged/deduped by job ID.
+- `date_posted: past_24h` + `sort_by: date` (`sortBy=DD`) → only fresh postings.
+- `max_applications: 5` for a small daily cadence.
+
+**Resume tailoring guardrails:**
+- Bullet text is always used verbatim (never LLM-rewritten). By default all bullets
+  are kept in original order (`reorder_bullets: false`, `max_bullets_per_job: null`),
+  so real experience and impact metrics are never dropped or altered. The summary
+  prompt forbids inventing skills/metrics.
+
+**Error tracking:**
+- New `errors` table + `log_error`/`get_errors`/`error_count`. Resume-tailor, apply,
+  and fatal errors are recorded with stage/type/company/job context and surfaced via
+  the `errors` CLI and the dashboard.
+
+**Localhost dashboard (`web/dashboard.py`):**
+- Flask app + JSON API (`/api/summary|applications|runs|errors`) with a single-page
+  dark UI: summary cards (applications, needs-review, errors, tokens, est. cost) and
+  tabs for applications, runs, and errors. Auto-refreshes every 15s. `velvetoverride
+  dashboard` launches it (default http://127.0.0.1:5000).
+
+**Daily scheduling (Windows):**
+- `scripts/register_schedule.ps1` registers a per-user Task Scheduler job at the
+  local-time equivalent of 9:00 AM Pacific (DST-aware). `scripts/run_daily.ps1`
+  runs one pipeline pass and logs to `data/logs/`.
+
+**Real profile data:** `config/profile.yaml` populated from the owner's actual resume
+(experience, education, publications, skills, per-tech years).
+
+**Test suite: 88 tests** (+18): adds `test_urls.py` (7 — job-ID/URL normalization) and
+`test_dedup_and_tracking.py` (11 — job_id dedup, error logging, token accounting).
 
 ---
 

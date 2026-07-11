@@ -103,6 +103,10 @@ eeo:
 # Answered from profile.yaml's technology_experience section.
 # These patterns help identify what technology the question is about.
 numeric:
+  # If the question names a technology that isn't in profile.yaml's
+  # technology_experience, ask the LLM (which sees your real years table) rather
+  # than emitting a blind `default`. Set false to always use `default`.
+  llm_for_unknown_tech: true
   experience_patterns:
     - "years of experience"
     - "how many years"
@@ -128,7 +132,7 @@ education:
     - "degree"
     - "qualification"
   # Value to select from dropdown; should match common LinkedIn options
-  answer: "Bachelor's Degree"
+  answer: "Master's Degree"
 
   has_degree:
     patterns:
