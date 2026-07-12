@@ -161,6 +161,35 @@ def create_app(db_path: str = "data/applications.db", resume_dir: str | Path | N
         # The effective (local-first) search + behavior config, redacted.
         return jsonify(_effective_config())
 
+    @app.route("/api/feedback")
+    def api_feedback() -> Any:
+        # Fields flagged for review, each with the routing problem (if any), so
+        # you can see which field got which answer and improve routing.
+        from velvetoverride.tracking.audit import flag_routing_problem
+        db = _db(app.config["DB_PATH"])
+        try:
+            rows = db.get_needs_review()
+            out = []
+            for r in rows:
+                problem = flag_routing_problem(
+                    r.get("question_text", ""), r.get("answer_given", ""),
+                    r.get("field_type", ""), r.get("answer_source", ""),
+                )
+                out.append({
+                    "company": r.get("company", ""),
+                    "job_title": r.get("job_title", ""),
+                    "field": r.get("question_text", ""),
+                    "field_type": r.get("field_type", ""),
+                    "answer": r.get("answer_given", ""),
+                    "source": r.get("answer_source", ""),
+                    "problem": problem,
+                })
+            # Flagged-with-problem first
+            out.sort(key=lambda x: (x["problem"] is None, x["company"]))
+            return jsonify(out)
+        finally:
+            db.close()
+
     @app.route("/resume/<path:name>")
     def resume_file(name: str):
         # Serve a generated resume PDF for review. Path-traversal safe: resolve
@@ -249,6 +278,13 @@ _PAGE = r"""
   .score-cell { white-space: nowrap; }
   .gaps { color: #cbd5e1; font-size: 12px; max-width: 260px; }
   .reason { color: var(--muted); font-size: 12px; max-width: 300px; }
+  .field-cell { color: #cbd5e1; font-size: 12.5px; max-width: 260px; }
+  .prob-cell { max-width: 240px; }
+  .flagged-row td { background: rgba(255,107,107,0.07); }
+  .prob-flag { display: inline-block; background: rgba(255,107,107,0.16); color: #ff8b8b;
+    border: 1px solid rgba(255,107,107,0.35); border-radius: 6px; padding: 2px 7px; font-size: 12px; }
+  .src-pill { display: inline-block; background: var(--panel2); border: 1px solid var(--border);
+    border-radius: 6px; padding: 1px 7px; font-size: 11.5px; color: var(--muted); }
   .hidden { display: none; }
   .refresh { font-size: 12px; color: var(--muted); cursor: pointer; }
   .empty { padding: 30px; text-align: center; color: var(--muted); }
@@ -275,12 +311,14 @@ _PAGE = r"""
   <div class="tabs">
     <div class="tab active" data-tab="apps" onclick="showTab('apps')">Applications</div>
     <div class="tab" data-tab="fit" onclick="showTab('fit')">Experience fit</div>
+    <div class="tab" data-tab="feedback" onclick="showTab('feedback')">Field feedback</div>
     <div class="tab" data-tab="config" onclick="showTab('config')">Config &amp; search</div>
     <div class="tab" data-tab="runs" onclick="showTab('runs')">Runs</div>
     <div class="tab" data-tab="errors" onclick="showTab('errors')">Errors</div>
   </div>
   <div id="apps"></div>
   <div id="fit" class="hidden"></div>
+  <div id="feedback" class="hidden"></div>
   <div id="config" class="hidden"></div>
   <div id="runs" class="hidden"></div>
   <div id="errors" class="hidden"></div>
@@ -298,9 +336,9 @@ async function getJSON(url){
 }
 
 async function loadAll(){
-  const [sum, apps, fit, runs, errors, cfg] = await Promise.all([
+  const [sum, apps, fit, feedback, runs, errors, cfg] = await Promise.all([
     getJSON('/api/summary'), getJSON('/api/applications'), getJSON('/api/fit'),
-    getJSON('/api/runs'), getJSON('/api/errors'), getJSON('/api/config'),
+    getJSON('/api/feedback'), getJSON('/api/runs'), getJSON('/api/errors'), getJSON('/api/config'),
   ]);
   const banner = document.getElementById('errbanner');
   if (sum == null && apps == null){
@@ -312,6 +350,7 @@ async function loadAll(){
   renderCards(sum || {});
   renderApps(apps || []);
   renderFit(fit || [], (sum && sum.fit) || {});
+  renderFeedback(feedback || []);
   renderConfig(cfg || {});
   renderRuns(runs || []);
   renderErrors(errors || []);
@@ -418,6 +457,33 @@ function renderFit(rows, summary){
      <th>Verdict</th><th>Gaps</th><th>Why</th><th>Outcome</th></tr></thead><tbody>${body}</tbody></table>`;
 }
 
+function renderFeedback(rows){
+  const el = document.getElementById('feedback');
+  if(!rows.length){
+    el.innerHTML = '<div class="empty">No fields flagged yet. After each run, mis-routed fields (a name field that got a sentence, a bad zip, an LLM answer needing review) show up here so you can fix routing.</div>';
+    return;
+  }
+  const flagged = rows.filter(r=>r.problem).length;
+  const legend = `<div class="fit-legend">
+      <b>${rows.length}</b> fields to review &middot;
+      <b style="color:#ff6b6b;">${flagged}</b> with a routing problem &middot;
+      ${rows.length-flagged} LLM answers for sign-off
+      <div class="muted" style="margin-top:4px;">Problem rows are likely mis-routed &mdash; use them to tighten <code>answers.yaml</code> or the field solver.</div>
+    </div>`;
+  const body = rows.map(r=>`<tr class="${r.problem?'flagged-row':''}">
+    <td>${esc(r.company)}</td>
+    <td>${esc(r.job_title)}</td>
+    <td class="field-cell">${esc(r.field)}</td>
+    <td>${esc(r.answer)}</td>
+    <td><span class="src-pill">${esc(r.source||'—')}</span></td>
+    <td>${esc(r.field_type||'')}</td>
+    <td class="prob-cell">${r.problem?`<span class="prob-flag">${esc(r.problem)}</span>`:'<span class="muted">review</span>'}</td>
+  </tr>`).join('');
+  el.innerHTML = legend +
+    `<table><thead><tr><th>Company</th><th>Role</th><th>Field</th><th>Answer given</th>
+     <th>Source</th><th>Type</th><th>Problem</th></tr></thead><tbody>${body}</tbody></table>`;
+}
+
 function chips(arr){
   if(!arr || !arr.length) return '<span class="muted">—</span>';
   return arr.map(x=>`<span class="chip">${esc(x)}</span>`).join(' ');
@@ -495,7 +561,7 @@ function renderErrors(rows){
 
 function showTab(t){
   document.querySelectorAll('.tab').forEach(el=>el.classList.toggle('active', el.dataset.tab===t));
-  ['apps','fit','config','runs','errors'].forEach(id=>document.getElementById(id).classList.toggle('hidden', id!==t));
+  ['apps','fit','feedback','config','runs','errors'].forEach(id=>document.getElementById(id).classList.toggle('hidden', id!==t));
 }
 
 loadAll();

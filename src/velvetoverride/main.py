@@ -470,6 +470,12 @@ async def run_bot(
         # ── Record LLM token usage for this run ──
         _record_usage(db, run_id, llm)
 
+        # ── Field-routing feedback audit (flags mis-routed fields for review) ──
+        try:
+            audit_field_routing(db, run_id)
+        except Exception as e:
+            log.warning("bot.field_audit_error", error=str(e))
+
         # ── Finish run tracking ──
         db.finish_run(
             run_id,
@@ -547,6 +553,42 @@ def _apply_search_overrides(config, keywords, locations) -> None:
         config.settings.setdefault("search", {})["keywords"] = list(keywords)
     if locations:
         config.settings.setdefault("search", {})["locations"] = list(locations)
+
+
+def audit_field_routing(db, run_id: int) -> list[dict]:
+    """Review every field->answer this run and flag likely mis-routings.
+
+    This is the feedback loop: anomalies are marked needs_review and logged as
+    errors (visible on the dashboard + `velvetoverride feedback`), so routing can
+    be corrected iteratively (approve/correct feeds the learned-answer memory).
+    """
+    from velvetoverride.tracking.audit import flag_routing_problem
+
+    issues: list[dict] = []
+    for q in db.get_run_questions(run_id):
+        problem = flag_routing_problem(
+            q.get("question_text", ""), q.get("answer_given", ""),
+            q.get("field_type", ""), q.get("answer_source", ""),
+        )
+        if problem:
+            issues.append({**q, "problem": problem})
+            try:
+                db.flag_question(q["id"])
+                db.log_error(
+                    stage="field_audit", run_id=run_id, error_type="routing",
+                    message=f"{(q.get('question_text') or '')[:50]!r} -> "
+                            f"{(q.get('answer_given') or '')[:50]!r} : {problem}",
+                    company=q.get("company", ""), job_title=q.get("job_title", ""),
+                )
+            except Exception as e:  # never let auditing break a run
+                log.debug("bot.field_audit_log_failed", error=str(e)[:80])
+
+    if issues:
+        log.warning("bot.field_audit", flagged=len(issues),
+                    examples=[i["problem"] for i in issues[:4]])
+    else:
+        log.info("bot.field_audit", flagged=0)
+    return issues
 
 
 def _record_usage(db, run_id, llm) -> None:
@@ -932,6 +974,55 @@ def token_test(ctx, jobs, apps_per_day):
     click.echo(f"    mini models: ~2.5M tokens/day (tier 1-2) -- usage is "
                f"{(p['tokens_per_day']/2_500_000*100):.2f}% of that bucket")
     click.echo(f"{'='*64}\n")
+
+
+@cli.command()
+@click.option("--run-id", type=int, default=None, help="Audit a specific run (default: most recent)")
+@click.option("--all", "show_all", is_flag=True, help="Show every field->answer, not just flagged ones")
+@click.pass_context
+def feedback(ctx, run_id, show_all):
+    """Field-routing feedback: which answer went into which field, with flagged
+    mis-routings (e.g. a name field that got a sentence). Use this after a run to
+    review and correct routing; `review --approve` then feeds the fixes back."""
+    config = load_config(Path(ctx.obj["config_dir"]) if ctx.obj["config_dir"] else None)
+    from velvetoverride.tracking.database import TrackingDB
+
+    db = TrackingDB(config.tracking.get("database_path", "data/applications.db"))
+    db.connect()
+    if run_id is None:
+        runs_list = db.get_runs(limit=1)
+        if not runs_list:
+            click.echo("No runs recorded yet.")
+            db.close()
+            return
+        run_id = runs_list[0]["id"]
+
+    issues = audit_field_routing(db, run_id)
+    questions = db.get_run_questions(run_id)
+    flagged_ids = {i["id"] for i in issues}
+    db.close()
+
+    click.echo(f"\n{'='*74}\n  Field routing — run #{run_id}  "
+               f"({len(questions)} fields, {len(issues)} flagged)\n{'='*74}")
+    problems = {i["id"]: i["problem"] for i in issues}
+    shown = 0
+    for q in questions:
+        flagged = q["id"] in flagged_ids
+        if not show_all and not flagged:
+            continue
+        shown += 1
+        mark = "⚠ " if flagged else "  "
+        label = (q.get("question_text") or "")[:44]
+        ans = (q.get("answer_given") or "")[:46]
+        click.echo(f"\n{mark}[{q.get('company','')[:16]}] {label!r}  ({q.get('field_type','')}/{q.get('answer_source','')})")
+        click.echo(f"     -> {ans!r}")
+        if flagged:
+            click.echo(f"     PROBLEM: {problems[q['id']]}")
+    if not shown:
+        click.echo("\n  No flagged routing issues 🎉  (use --all to see every field)")
+    click.echo(f"\n  Flagged fields are marked needs_review — run "
+               f"`velvetoverride review --approve` to correct them (feeds learned answers).")
+    click.echo(f"{'='*74}\n")
 
 
 @cli.command()

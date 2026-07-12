@@ -126,17 +126,31 @@ class FieldSolver:
         compelling answer grounded in the applicant's real background + the JD."""
         if self._llm is None:
             return None
-        if field.field_type not in (FieldType.TEXTAREA, FieldType.TEXT):
-            return None
         label = field.label.lower()
-        cover_kw = (
-            "cover letter", "letter of interest", "why are you interested",
-            "why do you want", "why this role", "why this company", "why you",
-            "tell us why", "what interests you", "motivation", "why should we",
-            "summary", "additional information", "anything else you", "message to",
-            "note to the", "pitch", "tell us about yourself",
+        # Never treat a contact/identity field as a cover letter
+        if any(x in label for x in (
+            "name", "email", "phone", "zip", "postal", "city", "state",
+            "country", "address", "url", "linkedin", "github", "website",
+            "salary", "date", "code",
+        )):
+            return None
+        # Broad "why/summary" prompts must be a real multi-line textarea; only an
+        # explicit "cover letter" is accepted on a single-line text input.
+        explicit = ("cover letter", "letter of interest")
+        cover_kw = explicit + (
+            "why are you interested", "why do you want", "why this role",
+            "why this company", "why you", "tell us why", "what interests you",
+            "motivation", "why should we", "summary", "additional information",
+            "anything else you", "message to", "note to the", "pitch",
+            "tell us about yourself",
         )
-        if not any(k in label for k in cover_kw):
+        if field.field_type == FieldType.TEXTAREA:
+            if not any(k in label for k in cover_kw):
+                return None
+        elif field.field_type == FieldType.TEXT:
+            if not any(k in label for k in explicit):
+                return None
+        else:
             return None
         try:
             text = self._llm.generate_cover_letter_snippet(
@@ -198,6 +212,40 @@ class FieldSolver:
 
         return None
 
+    def _name_answer(self, label: str) -> str | None:
+        """Resolve name fields (first/last/full/preferred) from the profile.
+
+        Guards against non-person "name" fields (company/file/user name) so a
+        long form-name label never gets the applicant's name — and so name
+        fields never fall through to the LLM (which caused a job summary to be
+        typed into a name box).
+        """
+        p = self._config.personal
+        first = str(p.get("first_name", "")).strip()
+        last = str(p.get("last_name", "")).strip()
+        full = f"{first} {last}".strip()
+
+        # Not a person's-name field
+        if any(x in label for x in (
+            "company", "organization", "organisation", "employer", "file",
+            "username", "user name", "reference", "manager", "supervisor",
+            "school", "university", "institution", "product",
+        )):
+            return None
+
+        if any(k in label for k in ("first name", "given name", "legal first", "forename")):
+            return first or None
+        if any(k in label for k in ("last name", "family name", "surname", "legal last")):
+            return last or None
+        if "middle name" in label:
+            return ""  # explicit empty — don't let it reach the LLM
+        if any(k in label for k in ("preferred name", "nickname", "goes by")):
+            return first or None
+        if any(k in label for k in ("full name", "legal name", "your name",
+                                    "candidate name", "applicant name")) or label.strip() == "name":
+            return full or None
+        return None
+
     def _check_profile(self, field: FormField) -> str | None:
         """Check if the field can be answered from profile data."""
         label = field.label.lower()
@@ -207,6 +255,11 @@ class FieldSolver:
         # which would otherwise return the country name into a code dropdown.
         if "country code" in label or "phone code" in label or "dialing code" in label:
             return personal.get("phone_country_code", "United States (+1)")
+
+        # Name fields — resolved explicitly so they never reach the LLM.
+        name = self._name_answer(label)
+        if name is not None:
+            return name
 
         mappings = {
             "first name": personal.get("first_name"),

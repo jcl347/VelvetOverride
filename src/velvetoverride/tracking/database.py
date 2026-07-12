@@ -314,6 +314,24 @@ class TrackingDB:
     # 'failed' and 'skipped' are intentionally excluded so we CAN retry them.
     _APPLIED_STATUSES = ("applied", "dry_run", "needs_review")
 
+    def get_run_questions(self, run_id: int) -> list[dict]:
+        """All Q&A recorded during a run, with the job context (for auditing)."""
+        rows = self.conn.execute(
+            """SELECT q.id, q.question_text, q.field_type, q.answer_given,
+                      q.answer_source, q.needs_review, a.company, a.job_title
+               FROM questions q JOIN applications a ON q.application_id = a.id
+               WHERE a.run_id = ? ORDER BY q.id""",
+            (run_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def flag_question(self, question_id: int) -> None:
+        """Mark a question as needing human review."""
+        self.conn.execute(
+            "UPDATE questions SET needs_review = 1 WHERE id = ?", (question_id,)
+        )
+        self.conn.commit()
+
     def is_already_applied(self, job_url: str, job_id: str | None = None) -> bool:
         """Check if we've already SUCCESSFULLY applied to this job.
 
