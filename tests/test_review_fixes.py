@@ -158,3 +158,39 @@ def test_years_matches_cpp_and_csharp():
     fs = FieldSolver(c)
     assert fs._resolve_experience_years("years of experience with C++") == "4"
     assert fs._resolve_experience_years("How many years with C#?") == "3"
+
+
+# ── cover letter / summary routing ──
+
+class _CoverLLM:
+    def generate_cover_letter_snippet(self, title, company, jd, profile):
+        return f"Compelling case for {title} at {company}."
+
+
+def test_cover_letter_field_routed_to_llm():
+    from velvetoverride.linkedin.fields import FormField
+    from velvetoverride.tracking.models import FieldType
+    from velvetoverride.agent.field_solver import FieldSolver
+    fs = FieldSolver(Config(profile={"personal": {"first_name": "J"}}), _CoverLLM())
+    f = FormField(label="Cover letter", field_type=FieldType.TEXTAREA, locator=None)
+    out = fs._check_cover_letter(f, "JD text", "MLE", "Acme")
+    assert out == "Compelling case for MLE at Acme."
+
+
+def test_why_interested_routed_to_cover_letter():
+    from velvetoverride.linkedin.fields import FormField
+    from velvetoverride.tracking.models import FieldType
+    from velvetoverride.agent.field_solver import FieldSolver
+    fs = FieldSolver(Config(profile={"personal": {}}), _CoverLLM())
+    f = FormField(label="Why are you interested in this role?",
+                  field_type=FieldType.TEXTAREA, locator=None)
+    assert fs._check_cover_letter(f, "JD", "MLE", "Acme") is not None
+
+
+def test_non_cover_field_not_routed():
+    from velvetoverride.linkedin.fields import FormField
+    from velvetoverride.tracking.models import FieldType
+    from velvetoverride.agent.field_solver import FieldSolver
+    fs = FieldSolver(Config(profile={"personal": {}}), _CoverLLM())
+    f = FormField(label="Phone number", field_type=FieldType.TEXT, locator=None)
+    assert fs._check_cover_letter(f, "JD", "MLE", "Acme") is None

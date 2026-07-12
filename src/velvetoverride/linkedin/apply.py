@@ -204,14 +204,36 @@ class ApplicationFlow:
                     await self._click_next()
                     await random_delay(1.5, 3.0)
                 else:
-                    # No next or submit — surface the error rather than dying silently
-                    reason = (
-                        f"No navigation available: {last_errors[0]}"
-                        if last_errors else "No Next/Submit button found"
-                    )
-                    log.warning("apply.no_navigation", step=step, reason=reason)
-                    await self._dismiss_modal()
-                    return self._make_record(listing, ApplicationStatus.FAILED, reason)
+                    # Selector-based Next/Submit not found. The footer button may
+                    # just be lazy/renamed — wait briefly and fall back to the
+                    # modal's PRIMARY action button before giving up.
+                    await random_delay(1.2, 2.2)
+                    kind, btn = await self._primary_action()
+                    if kind == "submit" and not dry_run:
+                        await self._scroll_and_click(btn)
+                        await random_delay(2.0, 4.0)
+                        if await self._submission_confirmed():
+                            log.info("apply.submitted", company=listing.company, title=listing.title, via="primary")
+                            await self._dismiss_modal()
+                            return self._make_record(listing, ApplicationStatus.APPLIED)
+                        last_errors = await self._fix_validation_errors(fields, listing, modal) or last_errors
+                    elif kind == "submit" and dry_run:
+                        await self._dismiss_modal()
+                        return self._make_record(listing, ApplicationStatus.DRY_RUN, "Dry run — not submitted")
+                    elif kind == "next":
+                        log.info("apply.next", via="primary", step=step + 1)
+                        await self._scroll_and_click(btn)
+                        await random_delay(1.5, 3.0)
+                    else:
+                        # Truly no navigation — log the actual buttons for diagnosis
+                        labels = await self._collect_button_labels(self._page)
+                        reason = (
+                            f"No navigation available: {last_errors[0]}"
+                            if last_errors else "No Next/Submit button found"
+                        )
+                        log.warning("apply.no_navigation", step=step, reason=reason, buttons=labels[:10])
+                        await self._dismiss_modal()
+                        return self._make_record(listing, ApplicationStatus.FAILED, reason)
 
             reason = (
                 f"Max form steps exceeded; last error: {last_errors[0]}"
@@ -888,6 +910,42 @@ class ApplicationFlow:
         # Fallback: click first option if it's a yes/no and value suggests yes
         if value_lower in ("yes", "true") and await radios.count() > 0:
             await radios.first.click()
+
+    async def _primary_action(self):
+        """Classify the Easy Apply modal's PRIMARY footer button.
+
+        Returns ("submit"|"next", locator) or (None, None). This is the robust
+        fallback when text/aria selectors miss LinkedIn's button — the footer
+        primary button always exists on a valid step.
+        """
+        modal = await self._easy_apply_modal()
+        root = modal if modal is not None else self._page
+        selectors = (
+            'button[data-easy-apply-next-button], '
+            'button[data-live-test-easy-apply-next-button], '
+            '.artdeco-modal__actionbar button.artdeco-button--primary, '
+            'footer button.artdeco-button--primary, '
+            'button.artdeco-button--primary'
+        )
+        try:
+            btns = root.locator(selectors)
+            n = await btns.count()
+        except Exception:
+            return None, None
+        for i in range(min(n, 6)):
+            b = btns.nth(i)
+            try:
+                if not await b.is_visible():
+                    continue
+                label = ((await b.get_attribute("aria-label")) or
+                         (await b.text_content()) or "").lower()
+                if any(k in label for k in ("submit", "send application", "finish")):
+                    return "submit", b
+                # anything else primary advances the form
+                return "next", b
+            except Exception:
+                continue
+        return None, None
 
     async def _is_review_step(self) -> bool:
         """Check if the current step has a Submit/Review button."""

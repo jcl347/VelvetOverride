@@ -106,12 +106,47 @@ class FieldSolver:
         if yes_default is not None:
             return yes_default, "config", True
 
+        # ── Tier 5c: Cover letter / summary / "why interested" ──
+        # Make a compelling case from the applicant's real background + the JD.
+        cover = self._check_cover_letter(field, job_description, job_title, company)
+        if cover is not None:
+            return cover, "llm", True
+
         # ── Tier 6: LLM fallback ──
         if self._llm:
             return self._ask_llm(field, job_description, job_title, company)
 
         log.warning("solver.no_answer", label=field.label)
         return None, "skip", False
+
+    def _check_cover_letter(
+        self, field: FormField, job_description: str, job_title: str, company: str
+    ) -> str | None:
+        """For cover-letter / summary / motivation textareas, generate a
+        compelling answer grounded in the applicant's real background + the JD."""
+        if self._llm is None:
+            return None
+        if field.field_type not in (FieldType.TEXTAREA, FieldType.TEXT):
+            return None
+        label = field.label.lower()
+        cover_kw = (
+            "cover letter", "letter of interest", "why are you interested",
+            "why do you want", "why this role", "why this company", "why you",
+            "tell us why", "what interests you", "motivation", "why should we",
+            "summary", "additional information", "anything else you", "message to",
+            "note to the", "pitch", "tell us about yourself",
+        )
+        if not any(k in label for k in cover_kw):
+            return None
+        try:
+            text = self._llm.generate_cover_letter_snippet(
+                job_title, company, job_description, self._build_profile_summary()
+            )
+            log.info("solver.cover_letter", label=field.label[:50], chars=len(text or ""))
+            return text or None
+        except Exception as e:
+            log.warning("solver.cover_letter_failed", error=str(e)[:80])
+            return None
 
     def _handle_file_upload(self, field: FormField) -> tuple[str | None, str, bool]:
         """Handle resume/file upload fields."""
