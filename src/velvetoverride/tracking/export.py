@@ -22,19 +22,24 @@ def export_csv(db: TrackingDB, output_path: str | Path) -> Path:
 
     applications = db.get_applications(limit=10000)
 
-    with open(path, "w", newline="") as f:
+    # encoding="utf-8" or a non-cp1252 char in a title/company/notes aborts the
+    # whole export on Windows.
+    with open(path, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow([
-            "ID", "Job URL", "Job Title", "Company", "Location",
-            "Status", "Match Score", "Resume Version", "Applied At",
+            "ID", "Job ID", "Job URL", "Job Title", "Company", "Location",
+            "Status", "Match Score", "Fit Score", "Fit Seniority",
+            "Fit Recommend", "Fit Gaps", "Resume Version", "Applied At",
             "Salary Min", "Salary Max", "Salary Raw",
             "Questions Count", "Needs Review", "Notes",
         ])
         for app in applications:
             needs_review = sum(1 for q in app.questions if q.needs_review)
             writer.writerow([
-                app.id, app.job_url, app.job_title, app.company,
+                app.id, app.job_id, app.job_url, app.job_title, app.company,
                 app.location, app.status, f"{app.match_score:.1f}",
+                app.fit_score if app.fit_score is not None else "",
+                app.fit_seniority, app.fit_recommend, app.fit_gaps,
                 app.resume_version, app.applied_at,
                 app.salary_min or "", app.salary_max or "", app.salary_raw,
                 len(app.questions), needs_review, app.notes,
@@ -54,6 +59,7 @@ def export_json(db: TrackingDB, output_path: str | Path) -> Path:
     for app in applications:
         data.append({
             "id": app.id,
+            "job_id": app.job_id,
             "job_url": app.job_url,
             "job_title": app.job_title,
             "company": app.company,
@@ -61,6 +67,11 @@ def export_json(db: TrackingDB, output_path: str | Path) -> Path:
             "job_description": app.job_description,
             "status": app.status,
             "match_score": app.match_score,
+            "fit_score": app.fit_score,
+            "fit_seniority": app.fit_seniority,
+            "fit_recommend": app.fit_recommend,
+            "fit_reasoning": app.fit_reasoning,
+            "fit_gaps": app.fit_gaps,
             "resume_version": app.resume_version,
             "applied_at": app.applied_at,
             "salary_min": app.salary_min,
@@ -79,8 +90,8 @@ def export_json(db: TrackingDB, output_path: str | Path) -> Path:
             ],
         })
 
-    with open(path, "w") as f:
-        json.dump(data, f, indent=2)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
 
     log.info("export.json", path=str(path), count=len(data))
     return path

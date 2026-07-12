@@ -44,8 +44,22 @@ async def _read_login_errors(page: Page) -> list[str]:
     return messages
 
 
+async def _has_auth_cookie(page: Page) -> bool:
+    """Passively check for LinkedIn's authenticated-session cookie (no navigation)."""
+    try:
+        cookies = await page.context.cookies("https://www.linkedin.com")
+        return any(c.get("name") == "li_at" and c.get("value") for c in cookies)
+    except Exception:
+        return False
+
+
 async def is_logged_in(page: Page) -> bool:
-    """Check if the current session is authenticated."""
+    """Check if the current session is authenticated.
+
+    NOTE: this NAVIGATES to the feed. Do not call it from the manual-login poll
+    loop (use `_has_auth_cookie` there) — navigating would wipe a user's
+    in-progress sign-in.
+    """
     await page.goto(FEED_URL, wait_until="domcontentloaded", timeout=15000)
     # If we land on the feed, we're logged in
     url = page.url
@@ -154,10 +168,16 @@ async def login(page: Page, config: Config) -> bool:
             if "/feed" in page.url:
                 log.info("auth.login_success", via="manual")
                 return True
-            # Nudge to the feed to confirm an established session
-            if await is_logged_in(page):
-                log.info("auth.login_success", via="manual_session")
-                return True
+            # PASSIVE check only — do NOT navigate here. Force-navigating to the
+            # feed while the user is mid-way through the Google account picker /
+            # 2FA / SSO password would reload the tab and wipe their input every
+            # few seconds, making manual login impossible. LinkedIn sets the
+            # `li_at` cookie once authenticated; detect that instead.
+            if await _has_auth_cookie(page):
+                # Confirm ONCE now that a real session exists.
+                if await is_logged_in(page):
+                    log.info("auth.login_success", via="manual_session")
+                    return True
         except Exception:
             pass
         if waited % 30 == 0:

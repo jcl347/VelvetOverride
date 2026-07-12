@@ -54,12 +54,13 @@ async def run_bot(
         keep_open = config.browser.get("keep_open", False)
 
     is_dry_run = config.bot.get("dry_run", True)
-    max_apps = max_apps_override or config.bot.get("max_applications", 25)
+    # Use `is not None` so an explicit 0 override is honored (not treated as unset)
+    max_apps = max_apps_override if max_apps_override is not None else config.bot.get("max_applications", 25)
 
     # Salary filter: CLI overrides take precedence, then settings.yaml
     salary_cfg = config.settings.get("salary", {})
-    effective_min_salary = min_salary or salary_cfg.get("min_annual")
-    effective_max_salary = max_salary or salary_cfg.get("max_annual")
+    effective_min_salary = min_salary if min_salary is not None else salary_cfg.get("min_annual")
+    effective_max_salary = max_salary if max_salary is not None else salary_cfg.get("max_annual")
 
     log.info(
         "bot.starting",
@@ -91,11 +92,20 @@ async def run_bot(
     db = TrackingDB(config.tracking.get("database_path", "data/applications.db"))
     db.connect()
 
-    # Start run tracking
+    # Start run tracking — snapshot the effective search config (the dashboard
+    # reads this back to show what a run searched for).
     config_snapshot = json.dumps({
         "dry_run": is_dry_run,
         "keywords": config.search.get("keywords", []),
-        "location": config.search.get("location", ""),
+        "locations": config.search.get("locations", []),
+        "date_posted": config.search.get("date_posted", ""),
+        "remote": config.search.get("remote", []),
+        "experience_levels": config.search.get("experience_levels", []),
+        "easy_apply_only": config.search.get("easy_apply_only", True),
+        "external_apply": config.bot.get("external_apply", True),
+        "min_salary": effective_min_salary,
+        "max_salary": effective_max_salary,
+        "fit": config.settings.get("fit", {}),
     }, default=str)
     run_id = db.start_run(
         dry_run=is_dry_run,
@@ -163,12 +173,15 @@ async def run_bot(
             return
 
         # ── Score and sort listings by match ──
+        # Scoring is pure keyword overlap (no LLM), so it runs unconditionally.
+        # Descriptions are usually empty at this stage (fetched per-job later),
+        # so this is a coarse pre-sort; the real min_match_score gate is applied
+        # after the full JD is fetched in the apply loop.
         min_score = config.search.get("min_match_score", 0)
-        if llm and listings:
+        if listings:
             listings = _score_listings(listings, config, llm)
-            listings = [l for l in listings if l.match_score >= min_score]
             listings.sort(key=lambda l: l.match_score, reverse=True)
-            log.info("bot.after_scoring", remaining=len(listings))
+            log.info("bot.after_scoring", count=len(listings))
 
         # ── Extract salary ranges and filter ──
         if effective_min_salary or effective_max_salary:
@@ -225,12 +238,16 @@ async def run_bot(
                 skipped_count += 1
                 continue
 
-            # Fuzzy dedup by title + company
+            # Fuzzy dedup by title + company. Only successfully-applied jobs
+            # block a match — FAILED/SKIPPED rows must remain retryable, matching
+            # is_already_applied's intent.
             similar = db.find_similar_jobs(listing.title, listing.company)
             is_fuzzy_dup = False
             if similar:
                 from thefuzz import fuzz
                 for s in similar:
+                    if s.status in ("failed", "skipped"):
+                        continue
                     if fuzz.ratio(listing.title.lower(), s.job_title.lower()) > 85:
                         log.info(
                             "bot.skip_fuzzy_dup",
@@ -266,12 +283,27 @@ async def run_bot(
                             listing.salary_min = salary.annual_min
                             listing.salary_max = salary.annual_max
                             listing.salary_raw = salary.raw_text
-                        # Recompute the match score against the real JD
-                        if llm:
-                            _score_listings([listing], config, llm)
-                            log.info("bot.rescored", title=listing.title, score=f"{listing.match_score:.0f}")
+                        # Recompute the match score against the real JD (no LLM)
+                        _score_listings([listing], config, llm)
+                        log.info("bot.rescored", title=listing.title, score=f"{listing.match_score:.0f}")
                 except Exception as e:
                     log.warning("bot.jd_fetch_error", error=str(e), url=listing.url)
+
+            # ── Re-apply match + salary gates now that we have the full JD ──
+            # (the initial pass ran against an empty description).
+            if listing.description:
+                if listing.match_score < min_score:
+                    log.info("bot.skip_low_match", title=listing.title,
+                             score=f"{listing.match_score:.0f}", min=min_score)
+                    skipped_count += 1
+                    continue
+                if (effective_min_salary or effective_max_salary):
+                    salary = extract_salary(listing.description)
+                    if not salary_in_range(salary, effective_min_salary, effective_max_salary):
+                        log.info("bot.skip_salary", title=listing.title,
+                                 salary=str(salary) if salary else "unknown")
+                        skipped_count += 1
+                        continue
 
             # JD-keyword blacklist (applied now that we have the full description)
             blacklist_kw = [k.lower() for k in config.search.get("blacklist_keywords", [])]
@@ -322,9 +354,20 @@ async def run_bot(
                 except Exception as e:
                     log.warning("bot.fit_error", error=str(e), title=listing.title)
 
-            # Tailor resume if LLM available, with fallback to default resume
+            # ── Choose the resume for this job ──
+            # resume.mode == "static": always upload the user's own file.
+            # resume.mode == "tailored": generate a per-job PDF (fallback to the
+            # user's static file / base resume if generation fails).
+            resume_mode = config.resume_config.get("mode", "tailored")
             resume_path = None
-            if resume_tailor and listing.description:
+            if resume_mode == "static":
+                resume_path = _static_resume(config) or default_resume
+                if resume_path:
+                    log.info("bot.resume_static", path=resume_path)
+                else:
+                    log.warning("bot.resume_static_missing",
+                                msg="resume.mode=static but no static_resume_path/base resume found")
+            elif resume_tailor and listing.description:
                 try:
                     resume_path, ats_score, _ = resume_tailor.tailor_resume(
                         listing.title, listing.company, listing.description
@@ -337,12 +380,12 @@ async def run_bot(
                         error_type=type(e).__name__, company=listing.company,
                         job_title=listing.title, job_url=listing.url,
                     )
-                    resume_path = default_resume
+                    resume_path = _static_resume(config) or default_resume
                     if resume_path:
                         log.info("bot.resume_fallback", path=resume_path)
 
-            if not resume_path and default_resume:
-                resume_path = default_resume
+            if not resume_path:
+                resume_path = _static_resume(config) or default_resume
 
             # Apply
             try:
@@ -404,9 +447,13 @@ async def run_bot(
             delay_max = config.bot.get("delay_max", 18)
             await random_delay(delay_min, delay_max)
 
-            # Occasionally diversify activity
+            # Occasionally diversify activity (best-effort — a transient nav
+            # error here must not abort the whole run after a good application)
             if random.random() < 0.2:
-                await diversify_activity(page)
+                try:
+                    await diversify_activity(page)
+                except Exception as e:
+                    log.debug("bot.diversify_error", error=str(e)[:80])
 
         # ── Export results ──
         from velvetoverride.tracking.export import export_csv, export_json, export_review_queue
@@ -609,23 +656,35 @@ def _ensure_base_resume(config, resume_builder) -> str | None:
         return None
 
 
+_RESUME_UPLOAD_EXTS = {".pdf", ".doc", ".docx"}
+
+
+def _static_resume(config) -> str | None:
+    """The user's own resume file (resume.static_resume_path), if it exists and
+    is an uploadable format."""
+    static_path = config.resume_config.get("static_resume_path")
+    if static_path:
+        p = Path(static_path)
+        if p.exists() and p.suffix.lower() in _RESUME_UPLOAD_EXTS:
+            return str(p)
+        log.warning("bot.static_resume_invalid", path=static_path,
+                    exists=p.exists(), suffix=p.suffix)
+    return None
+
+
 def _find_default_resume(config) -> str | None:
-    """Find a default resume file for fallback when tailoring fails."""
+    """Fallback resume: the user's own static resume first, else the most
+    recently generated PDF. Never returns .html (LinkedIn rejects it)."""
+    # Prefer the user's own configured resume over a stale generated one
+    static = _static_resume(config)
+    if static:
+        return static
+
     resume_dir = Path("data/resumes")
     if resume_dir.exists():
-        # Use the most recently generated resume
         resumes = sorted(resume_dir.glob("*.pdf"), key=lambda p: p.stat().st_mtime, reverse=True)
         if resumes:
             return str(resumes[0])
-        resumes = sorted(resume_dir.glob("*.html"), key=lambda p: p.stat().st_mtime, reverse=True)
-        if resumes:
-            return str(resumes[0])
-
-    # Check for a configured static resume path
-    static_path = config.resume_config.get("static_resume_path")
-    if static_path and Path(static_path).exists():
-        return static_path
-
     return None
 
 

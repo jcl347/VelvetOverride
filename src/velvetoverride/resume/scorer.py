@@ -45,7 +45,8 @@ class ATSScorer:
 
         total = len(jd_keywords)
         coverage = matched / total if total > 0 else 1.0
-        score = min(coverage / self._target_coverage * 100, 100)
+        target = max(self._target_coverage, 1e-6)  # guard against a 0 target
+        score = min(coverage / target * 100, 100)
 
         log.info(
             "ats.scored",
@@ -65,7 +66,8 @@ class ATSScorer:
         # Summary
         parts.append(resume_data.get("summary", ""))
 
-        # Experience bullets
+        # Experience bullets + per-role technologies (which the tailoring
+        # pipeline injects specifically for ATS keyword coverage)
         for job in resume_data.get("experience", []):
             parts.append(job.get("title", ""))
             parts.append(job.get("company", ""))
@@ -74,6 +76,13 @@ class ATSScorer:
                     parts.append(bullet)
                 elif isinstance(bullet, dict):
                     parts.append(bullet.get("text", ""))
+            parts.extend(job.get("technologies", []) or [])
+
+        # Projects (name, detail, tech)
+        for proj in resume_data.get("projects", []):
+            parts.append(proj.get("name", ""))
+            parts.append(proj.get("detail", ""))
+            parts.extend(proj.get("tech", []) or [])
 
         # Skills
         skills = resume_data.get("skills", {})

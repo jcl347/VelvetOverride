@@ -73,18 +73,25 @@ JOB_TYPE_MAP = {
 }
 
 
-def build_search_url(config: Config, keyword: str | None = None) -> str:
+def build_search_url(config: Config, keyword: str | None = None,
+                     location: str | None = None) -> str:
     """Build a LinkedIn jobs search URL from config filters.
 
-    If ``keyword`` is given, that single role is used as the query; otherwise all
-    configured keywords are joined (legacy behavior). Prefer the per-keyword form
-    so each target role gets its own clean search.
+    If ``keyword``/``location`` are given, those single values are used;
+    otherwise falls back to joining the configured lists. LinkedIn's `location`
+    param is a single place — multiple locations must be searched separately
+    (the scraper loops over them), never comma-joined into one param.
     """
     search = config.search
     query = keyword if keyword is not None else " ".join(search.get("keywords", []))
+    if location is not None:
+        loc = location
+    else:
+        locs = search.get("locations", [])
+        loc = locs[0] if locs else ""
     params: dict[str, str] = {
         "keywords": query,
-        "location": ", ".join(search.get("locations", [])),
+        "location": loc,
     }
 
     if search.get("easy_apply_only", True):
@@ -136,28 +143,33 @@ async def scrape_job_listings(page: Page, config: Config, max_pages: int = 3) ->
 
     max_pages = int(config.search.get("max_pages", max_pages))
 
+    # Each location is a separate LinkedIn search (the `location` param is a
+    # single place). Cross keywords x locations, merging + de-duping by job id.
+    locations = config.search.get("locations", []) or [""]
+
     all_listings: list[JobListing] = []
     seen_ids: set[str] = set()
     seen_urls: set[str] = set()
 
-    for keyword in keywords:
-        url = build_search_url(config, keyword=keyword)
-        log.info("search.navigating", keyword=keyword, url=url)
-        listings = await _scrape_one_search(page, config, url, max_pages)
-        added = 0
-        for listing in listings:
-            dedup_key = listing.job_id or listing.url
-            if listing.job_id and listing.job_id in seen_ids:
-                continue
-            if listing.url and listing.url in seen_urls:
-                continue
-            if listing.job_id:
-                seen_ids.add(listing.job_id)
-            if listing.url:
-                seen_urls.add(listing.url)
-            all_listings.append(listing)
-            added += 1
-        log.info("search.keyword_done", keyword=keyword, found=len(listings), new=added)
+    for location in locations:
+        for keyword in keywords:
+            url = build_search_url(config, keyword=keyword, location=location)
+            log.info("search.navigating", keyword=keyword, location=location, url=url)
+            listings = await _scrape_one_search(page, config, url, max_pages)
+            added = 0
+            for listing in listings:
+                if listing.job_id and listing.job_id in seen_ids:
+                    continue
+                if listing.url and listing.url in seen_urls:
+                    continue
+                if listing.job_id:
+                    seen_ids.add(listing.job_id)
+                if listing.url:
+                    seen_urls.add(listing.url)
+                all_listings.append(listing)
+                added += 1
+            log.info("search.keyword_done", keyword=keyword, location=location,
+                     found=len(listings), new=added)
 
     log.info("search.all_keywords_complete", total_unique=len(all_listings))
     return all_listings
@@ -277,11 +289,13 @@ async def _scrape_one_search(
         count = await cards.count()
         log.info("search.found_cards", count=count, page=page_num + 1)
 
+        dropped = 0
         for i in range(count):
             card = cards.nth(i)
             try:
                 listing = await _parse_job_card(card, page)
                 if listing is None:
+                    dropped += 1
                     continue
 
                 # Company blacklist (JD-keyword blacklist is applied later, once
@@ -293,6 +307,8 @@ async def _scrape_one_search(
                 all_listings.append(listing)
             except Exception as e:
                 log.warning("search.parse_error", error=str(e), index=i)
+        if dropped:
+            log.debug("search.cards_dropped", dropped=dropped, of=count, page=page_num + 1)
 
         # Try to go to the next results page (LinkedIn has several pager shapes)
         next_button = page.locator(
@@ -303,15 +319,31 @@ async def _scrape_one_search(
         )
         try:
             if await next_button.count() > 0 and await next_button.first.is_enabled():
+                # Remember the first card so we can confirm the page advanced
+                first_id_before = ""
+                try:
+                    first_id_before = await cards.first.get_attribute("data-occludable-job-id") or ""
+                except Exception:
+                    pass
                 await next_button.first.scroll_into_view_if_needed(timeout=4000)
                 await next_button.first.click()
                 await random_delay(2.0, 4.0)
-                # Reset the list scroll so the next page renders from the top
                 try:
                     await page.evaluate(_SCROLL_TOP_JS, selector)
                 except Exception:
                     pass
                 await random_delay(1.0, 2.0)
+                # Verify the results actually changed; a no-op click means we're
+                # at the last page (or the pager is stale) — stop rather than
+                # re-scrape the same page.
+                try:
+                    first_id_after = await page.locator(selector).first.get_attribute(
+                        "data-occludable-job-id") or ""
+                    if first_id_before and first_id_after and first_id_before == first_id_after:
+                        log.info("search.page_did_not_advance", page=page_num + 1)
+                        break
+                except Exception:
+                    pass
             else:
                 log.info("search.no_more_pages", page=page_num + 1)
                 break

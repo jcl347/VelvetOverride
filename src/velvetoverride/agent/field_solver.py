@@ -49,12 +49,21 @@ class FieldSolver:
         label = field.label.lower().strip()
 
         # ── Tier 1: Learned answers ──
+        # Require a strong match (normalized equality, or one string containing
+        # the other AND the shorter being reasonably long) to avoid a short
+        # learned key poisoning unrelated fields. Tolerate malformed entries.
         learned = self._answers.get("learned", {})
         if learned:
             for question_text, entry in learned.items():
-                if question_text.lower() in label or label in question_text.lower():
+                if not isinstance(entry, dict) or "answer" not in entry:
+                    continue
+                q = str(question_text).lower().strip()
+                if not q or len(q) < 6:
+                    continue
+                strong = q == label or (len(q) >= 12 and (q in label or label in q))
+                if strong:
                     log.debug("solver.learned_match", label=field.label)
-                    return entry["answer"], "learned", False
+                    return entry.get("answer"), "learned", False
 
         # ── Tier 2: File upload → resume ──
         if field.field_type == FieldType.FILE_UPLOAD:
@@ -80,9 +89,12 @@ class FieldSolver:
         if eeo_answer is not None:
             return eeo_answer, "config", False
 
-        # ── Tier 5a: Required consent/terms checkboxes must be ticked ──
-        # LinkedIn blocks the form with "Select checkbox to proceed" otherwise.
-        if field.field_type == FieldType.CHECKBOX:
+        # ── Tier 5a: Consent/terms checkboxes get ticked ──
+        # Only checkboxes whose label looks like a consent/acknowledgement are
+        # auto-ticked (LinkedIn blocks the form with "Select checkbox to proceed"
+        # otherwise). Other checkboxes fall through to the LLM so we don't blindly
+        # opt into unrelated things (marketing, "I am a veteran", etc.).
+        if field.field_type == FieldType.CHECKBOX and self._is_consent_checkbox(label):
             log.debug("solver.checkbox_consent", label=field.label[:60])
             return "Yes", "config", False
 
@@ -156,6 +168,11 @@ class FieldSolver:
         label = field.label.lower()
         personal = self._config.personal
 
+        # Phone country code FIRST — must beat the generic "country" mapping,
+        # which would otherwise return the country name into a code dropdown.
+        if "country code" in label or "phone code" in label or "dialing code" in label:
+            return personal.get("phone_country_code", "United States (+1)")
+
         mappings = {
             "first name": personal.get("first_name"),
             "last name": personal.get("last_name"),
@@ -169,6 +186,9 @@ class FieldSolver:
         }
 
         for pattern, value in mappings.items():
+            # Don't let "country" match a "country code" label (handled above)
+            if pattern == "country" and "code" in label:
+                continue
             if pattern in label and value:
                 return value
 
@@ -182,10 +202,6 @@ class FieldSolver:
         website_cfg = text_defaults.get("website", {})
         if any(p.lower() in label for p in website_cfg.get("patterns", [])):
             return personal.get("website") or personal.get("github", "")
-
-        # Phone country code (dropdown)
-        if "country code" in label or "phone code" in label:
-            return personal.get("phone_country_code", "United States (+1)")
 
         return None
 
@@ -205,18 +221,50 @@ class FieldSolver:
         # Options are a yes/no set (allow an extra "maybe"/blank)
         if not (opt_low & yesno) or not opt_low.issubset(yesno | {"", "maybe", "n/a"}):
             return None
+        # Do NOT auto-"Yes" adverse/legal questions — those must be answered
+        # truthfully; leave them for the LLM (which is flagged for review).
+        low = (field.label or "").lower()
+        adverse_kw = (
+            "convicted", "felony", "criminal", "misdemeanor", "terminated",
+            "fired", "disciplin", "lawsuit", "non-compete", "noncompete",
+            "debarred", "sanction", "restricted", "banned",
+        )
+        if any(k in low for k in adverse_kw):
+            return None
         for o in options:
             if o.strip().lower() == "yes":
                 log.info("solver.yes_default", label=field.label)
                 return o
         return None
 
-    def _check_location_preference(self, field: FormField) -> str | None:
-        """Answer location / work-arrangement questions with Seattle or Remote.
+    def _location_preferences(self) -> list[str]:
+        """Ordered list of preferred location/work-arrangement tokens.
 
-        For text fields returns the city; for dropdown/radio picks the option
-        that matches Seattle, then Remote, then Washington.
+        Built from the USER's own profile + search config (not hardcoded), so a
+        non-Seattle user gets the right answers. Order: their city, their state,
+        each configured search location, then remote/hybrid.
         """
+        personal = self._config.personal
+        prefs: list[str] = []
+        for v in (personal.get("city"), personal.get("state")):
+            if v:
+                prefs.append(str(v).split(",")[0].strip())
+        for loc in self._config.search.get("locations", []) or []:
+            prefs.append(str(loc).split(",")[0].strip())
+        # Configurable work-arrangement fallback (settings.yaml search.remote)
+        remote_cfg = self._config.search.get("remote", []) or ["remote", "hybrid"]
+        prefs.extend(["remote" if r == "remote" else r for r in remote_cfg])
+        # De-dup, drop empties, lowercase
+        seen, out = set(), []
+        for p in prefs:
+            pl = p.lower().strip()
+            if pl and pl not in seen:
+                seen.add(pl)
+                out.append(pl)
+        return out or ["remote"]
+
+    def _check_location_preference(self, field: FormField) -> str | None:
+        """Answer location / work-arrangement questions from the user's config."""
         label = field.label.lower()
         location_kw = (
             "preferred location", "work location", "which location", "office location",
@@ -226,19 +274,29 @@ class FieldSolver:
         if not any(k in label for k in location_kw):
             return None
 
-        personal = self._config.personal
-        city = personal.get("city", "Seattle")
+        prefs = self._location_preferences()
 
-        # For option-based fields, prefer Seattle, then Remote, then Washington
+        # Option-based: pick the first option matching the user's preference order
         if field.field_type in (FieldType.DROPDOWN, FieldType.RADIO) and field.options:
-            for pref in ("seattle", "remote", "washington", "hybrid"):
+            for pref in prefs:
                 for opt in field.options:
                     if pref in opt.lower():
                         return opt
             return field.options[0]
 
-        # Free-text location field
-        return city
+        # Free-text location field → the user's city (or first preference)
+        return self._config.personal.get("city") or prefs[0].title()
+
+    @staticmethod
+    def _is_consent_checkbox(label: str) -> bool:
+        """True if a checkbox label looks like a terms/consent acknowledgement."""
+        low = (label or "").lower()
+        consent_kw = (
+            "agree", "consent", "terms", "privacy", "acknowledge", "authorize",
+            "certify", "confirm", "i understand", "i have read", "gdpr",
+            "processing of my", "accept",
+        )
+        return any(k in low for k in consent_kw)
 
     def _check_eeo(self, field: FormField) -> str | None:
         """Handle EEO / voluntary self-identification questions."""
@@ -283,7 +341,10 @@ class FieldSolver:
         candidates.sort(key=lambda kv: len(kv[0]), reverse=True)
 
         for tech, years in candidates:
-            pattern = r"\b" + re.escape(str(tech).lower()) + r"\b"
+            term = str(tech).lower()
+            # Boundaries that tolerate symbol-bearing tech names (C++, C#, .NET,
+            # Node.js) — \b would never match a term ending in + # or .
+            pattern = r"(?<![\w.+#])" + re.escape(term) + r"(?![\w.+#])"
             if re.search(pattern, label_lower):
                 log.debug("solver.years_matched", tech=tech, years=years, label=label[:60])
                 return str(years)

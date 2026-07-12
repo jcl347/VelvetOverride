@@ -89,13 +89,20 @@ CREATE TABLE IF NOT EXISTS errors (
 );
 
 CREATE INDEX IF NOT EXISTS idx_applications_url ON applications(job_url);
-CREATE INDEX IF NOT EXISTS idx_applications_jobid ON applications(job_id);
 CREATE INDEX IF NOT EXISTS idx_applications_company ON applications(company);
 CREATE INDEX IF NOT EXISTS idx_applications_status ON applications(status);
 CREATE INDEX IF NOT EXISTS idx_questions_review ON questions(needs_review);
-CREATE INDEX IF NOT EXISTS idx_applications_run ON applications(run_id);
 CREATE INDEX IF NOT EXISTS idx_errors_run ON errors(run_id);
 """
+
+# Indexes on migration-added columns (job_id, run_id). These MUST be created
+# AFTER _run_migrations(), because on a pre-existing (upgraded) database the
+# columns don't exist yet when SCHEMA runs — creating them in SCHEMA would
+# crash connect() with "no such column".
+POST_MIGRATION_INDEXES = [
+    "CREATE INDEX IF NOT EXISTS idx_applications_jobid ON applications(job_id)",
+    "CREATE INDEX IF NOT EXISTS idx_applications_run ON applications(run_id)",
+]
 
 # Migration: add columns to existing databases that lack them
 MIGRATIONS = [
@@ -131,6 +138,13 @@ class TrackingDB:
         self._conn.execute("PRAGMA foreign_keys = ON")
         self._conn.executescript(SCHEMA)
         self._run_migrations()
+        # Indexes on migrated columns must be created only after the columns exist
+        for sql in POST_MIGRATION_INDEXES:
+            try:
+                self._conn.execute(sql)
+            except sqlite3.OperationalError:
+                pass
+        self._conn.commit()
         log.info("tracking.db_connected", path=str(self._db_path))
 
     def _run_migrations(self) -> None:
@@ -330,9 +344,19 @@ class TrackingDB:
         retried, so a retry must UPDATE the existing row rather than insert a
         duplicate (which would raise a UNIQUE constraint error).
         """
-        existing = self.conn.execute(
-            "SELECT id FROM applications WHERE job_url = ?", (record.job_url,)
-        ).fetchone()
+        # Match on job_id first (consistent with is_already_applied), then URL —
+        # so a job re-scraped under a slightly different URL updates its row
+        # instead of inserting a duplicate.
+        existing = None
+        if record.job_id:
+            existing = self.conn.execute(
+                "SELECT id FROM applications WHERE job_id = ? AND job_id != ''",
+                (record.job_id,),
+            ).fetchone()
+        if existing is None:
+            existing = self.conn.execute(
+                "SELECT id FROM applications WHERE job_url = ?", (record.job_url,)
+            ).fetchone()
 
         if existing is not None:
             app_id = existing["id"]
@@ -355,8 +379,11 @@ class TrackingDB:
                     record.fit_reasoning, record.fit_gaps, app_id,
                 ),
             )
-            # Replace the prior attempt's answers with this attempt's
-            self.conn.execute("DELETE FROM questions WHERE application_id = ?", (app_id,))
+            # Replace the prior attempt's answers with this attempt's — but only
+            # if the new attempt actually recorded questions, so a zero-question
+            # retry can't wipe an earlier attempt's Q&A audit trail.
+            if record.questions:
+                self.conn.execute("DELETE FROM questions WHERE application_id = ?", (app_id,))
             log.info("tracking.updated", app_id=app_id, company=record.company, status=record.status)
         else:
             cursor = self.conn.execute(

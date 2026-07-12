@@ -15,8 +15,6 @@ from flask import Flask, abort, jsonify, render_template_string, send_file
 
 from velvetoverride.tracking.database import TrackingDB
 
-RESUME_DIR = Path("data/resumes").resolve()
-
 
 def _db(db_path: str) -> TrackingDB:
     db = TrackingDB(db_path)
@@ -24,9 +22,76 @@ def _db(db_path: str) -> TrackingDB:
     return db
 
 
-def create_app(db_path: str = "data/applications.db") -> Flask:
+def _effective_config() -> dict:
+    """Load the EFFECTIVE (local-first) config and return a redacted, UI-safe
+    view — the roles/locations being searched and all behavioral settings.
+
+    Never includes secrets (API keys, passwords).
+    """
+    try:
+        from velvetoverride.utils.config import load_config
+        c = load_config()
+    except Exception as e:  # config not found / invalid
+        return {"error": str(e)}
+
+    search = c.search
+    bot = c.bot
+    ext = c.settings.get("external_apply", {}) or {}
+    return {
+        "profile": {
+            "name": f"{c.personal.get('first_name','')} {c.personal.get('last_name','')}".strip(),
+            "email": c.personal.get("email", ""),
+            "location": c.personal.get("location") or c.personal.get("city", ""),
+            "is_placeholder": str(c.personal.get("email", "")).lower()
+                in ("jane.doe@example.com", "you@example.com"),
+        },
+        "search": {
+            "keywords": search.get("keywords", []),
+            "locations": search.get("locations", []),
+            "date_posted": search.get("date_posted", ""),
+            "remote": search.get("remote", []),
+            "experience_levels": search.get("experience_levels", []),
+            "job_types": search.get("job_types", []),
+            "easy_apply_only": search.get("easy_apply_only", True),
+            "max_pages": search.get("max_pages", 3),
+            "min_match_score": search.get("min_match_score", 0),
+            "blacklist_companies": search.get("blacklist_companies", []),
+            "blacklist_keywords": search.get("blacklist_keywords", []),
+        },
+        "bot": {
+            "dry_run": bot.get("dry_run", True),
+            "max_applications": bot.get("max_applications", 25),
+        },
+        "external_apply": {
+            "enabled": ext.get("enabled", bot.get("external_apply", True)),
+            "submit": ext.get("submit", False),
+            "max_pages": ext.get("max_pages", bot.get("external_max_pages", 8)),
+        },
+        "resume": {
+            "mode": c.resume_config.get("mode", "tailored"),
+            "static_resume_path": c.resume_config.get("static_resume_path", ""),
+        },
+        "salary": {
+            "min_annual": c.settings.get("salary", {}).get("min_annual"),
+            "max_annual": c.settings.get("salary", {}).get("max_annual"),
+        },
+        "fit": c.settings.get("fit", {}),
+        "llm": {
+            "provider": c.llm_provider,
+            "field_model": c.llm.get("field_model", ""),
+            "resume_model": c.llm.get("resume_model", ""),
+            "configured": c.has_llm,
+        },
+    }
+
+
+def create_app(db_path: str = "data/applications.db", resume_dir: str | Path | None = None) -> Flask:
     app = Flask(__name__)
     app.config["DB_PATH"] = db_path
+    # Resumes live next to the DB (both under data/) unless told otherwise.
+    if resume_dir is None:
+        resume_dir = Path(db_path).resolve().parent / "resumes"
+    app.config["RESUME_DIR"] = Path(resume_dir).resolve()
 
     @app.route("/")
     def index() -> str:
@@ -91,11 +156,24 @@ def create_app(db_path: str = "data/applications.db") -> Flask:
         finally:
             db.close()
 
+    @app.route("/api/config")
+    def api_config() -> Any:
+        # The effective (local-first) search + behavior config, redacted.
+        return jsonify(_effective_config())
+
     @app.route("/resume/<path:name>")
     def resume_file(name: str):
-        # Serve a generated resume PDF for review (path-traversal safe)
-        target = (RESUME_DIR / name).resolve()
-        if not str(target).startswith(str(RESUME_DIR)) or not target.exists():
+        # Serve a generated resume PDF for review. Path-traversal safe: resolve
+        # and require the target be INSIDE the resume dir (is_relative_to, not a
+        # bare startswith which would allow a sibling like "data/resumes_evil").
+        resume_root = app.config["RESUME_DIR"]
+        target = (resume_root / name).resolve()
+        try:
+            inside = target.is_relative_to(resume_root)
+        except AttributeError:  # Python < 3.9
+            import os
+            inside = os.path.commonpath([str(target), str(resume_root)]) == str(resume_root)
+        if not inside or not target.exists() or not target.is_file():
             abort(404)
         return send_file(str(target))
 
@@ -174,6 +252,16 @@ _PAGE = r"""
   .hidden { display: none; }
   .refresh { font-size: 12px; color: var(--muted); cursor: pointer; }
   .empty { padding: 30px; text-align: center; color: var(--muted); }
+  .cfg-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 14px; }
+  .cfg-sec { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; }
+  .cfg-h { font-size: 12px; text-transform: uppercase; letter-spacing: .5px; color: var(--accent); margin-bottom: 8px; font-weight: 700; }
+  .cfg-t { background: transparent; }
+  .cfg-t td { border-bottom: 1px solid var(--border); padding: 6px 4px; vertical-align: top; }
+  .cfg-k { color: var(--muted); width: 45%; font-size: 12.5px; }
+  .cfg-v { font-size: 12.5px; }
+  .chip { display: inline-block; background: var(--panel2); border: 1px solid var(--border);
+    border-radius: 999px; padding: 2px 9px; font-size: 11.5px; margin: 1px 0; }
+  code { background: var(--panel2); padding: 1px 5px; border-radius: 4px; font-size: 12px; }
 </style>
 </head>
 <body>
@@ -182,36 +270,51 @@ _PAGE = r"""
   <span class="refresh" onclick="loadAll()">↻ refresh · <span id="ts"></span></span>
 </header>
 <div class="wrap">
+  <div id="errbanner" style="display:none;background:#3a1717;color:#f87171;border:1px solid #5b2323;border-radius:10px;padding:12px 16px;margin-bottom:16px;"></div>
   <div class="cards" id="cards"></div>
   <div class="tabs">
     <div class="tab active" data-tab="apps" onclick="showTab('apps')">Applications</div>
     <div class="tab" data-tab="fit" onclick="showTab('fit')">Experience fit</div>
+    <div class="tab" data-tab="config" onclick="showTab('config')">Config &amp; search</div>
     <div class="tab" data-tab="runs" onclick="showTab('runs')">Runs</div>
     <div class="tab" data-tab="errors" onclick="showTab('errors')">Errors</div>
   </div>
   <div id="apps"></div>
   <div id="fit" class="hidden"></div>
+  <div id="config" class="hidden"></div>
   <div id="runs" class="hidden"></div>
   <div id="errors" class="hidden"></div>
 </div>
 <script>
-function esc(s){ return (s==null?'':String(s)).replace(/[&<>]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+// Escape for both text AND double-quoted attribute contexts (quotes included).
+function esc(s){ return (s==null?'':String(s)).replace(/[&<>"']/g,
+  c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function money(n){ return n==null? '—' : '$'+Number(n).toLocaleString(); }
 function num(n){ return (n==null?0:n).toLocaleString(); }
 
+async function getJSON(url){
+  try { const r = await fetch(url); if(!r.ok) return null; return await r.json(); }
+  catch(e){ return null; }
+}
+
 async function loadAll(){
-  const [sum, apps, fit, runs, errors] = await Promise.all([
-    fetch('/api/summary').then(r=>r.json()),
-    fetch('/api/applications').then(r=>r.json()),
-    fetch('/api/fit').then(r=>r.json()),
-    fetch('/api/runs').then(r=>r.json()),
-    fetch('/api/errors').then(r=>r.json()),
+  const [sum, apps, fit, runs, errors, cfg] = await Promise.all([
+    getJSON('/api/summary'), getJSON('/api/applications'), getJSON('/api/fit'),
+    getJSON('/api/runs'), getJSON('/api/errors'), getJSON('/api/config'),
   ]);
-  renderCards(sum);
-  renderApps(apps);
-  renderFit(fit, sum.fit || {});
-  renderRuns(runs);
-  renderErrors(errors);
+  const banner = document.getElementById('errbanner');
+  if (sum == null && apps == null){
+    banner.style.display = 'block';
+    banner.textContent = 'Cannot reach the tracker API. Is the dashboard server running?';
+    return;
+  }
+  banner.style.display = 'none';
+  renderCards(sum || {});
+  renderApps(apps || []);
+  renderFit(fit || [], (sum && sum.fit) || {});
+  renderConfig(cfg || {});
+  renderRuns(runs || []);
+  renderErrors(errors || []);
   document.getElementById('ts').textContent = new Date().toLocaleTimeString();
 }
 
@@ -315,6 +418,52 @@ function renderFit(rows, summary){
      <th>Verdict</th><th>Gaps</th><th>Why</th><th>Outcome</th></tr></thead><tbody>${body}</tbody></table>`;
 }
 
+function chips(arr){
+  if(!arr || !arr.length) return '<span class="muted">—</span>';
+  return arr.map(x=>`<span class="chip">${esc(x)}</span>`).join(' ');
+}
+function yesno(b){ return b ? '<span class="fit-good">yes</span>' : '<span class="muted">no</span>'; }
+
+function renderConfig(c){
+  const el = document.getElementById('config');
+  if(!c || c.error){
+    el.innerHTML = `<div class="empty">Config unavailable${c&&c.error?': '+esc(c.error):''}</div>`;
+    return;
+  }
+  const s = c.search||{}, p = c.profile||{}, ext=c.external_apply||{}, r=c.resume||{}, llm=c.llm||{}, fit=c.fit||{}, sal=c.salary||{}, bot=c.bot||{};
+  const warn = p.is_placeholder
+    ? '<div style="background:#3a2e12;color:#fbbf24;border:1px solid #5b4a1a;border-radius:8px;padding:8px 12px;margin-bottom:12px;">⚠ Profile is still the placeholder — copy config/profile.yaml → config/profile.local.yaml and edit it before applying.</div>'
+    : '';
+  const section = (title, rows) =>
+    `<div class="cfg-sec"><div class="cfg-h">${esc(title)}</div><table class="cfg-t"><tbody>${rows}</tbody></table></div>`;
+  const row = (k,v) => `<tr><td class="cfg-k">${esc(k)}</td><td class="cfg-v">${v}</td></tr>`;
+
+  el.innerHTML = warn +
+    '<div class="cfg-grid">' +
+    section('Searching for these roles', row('Keywords', chips(s.keywords)) +
+        row('Locations', chips(s.locations)) +
+        row('Posted within', esc(s.date_posted||'any')) +
+        row('Work type', chips(s.remote)) +
+        row('Experience', chips(s.experience_levels)) +
+        row('Job types', chips(s.job_types)) +
+        row('Easy Apply only', yesno(s.easy_apply_only)) +
+        row('Pages/search', esc(s.max_pages)) +
+        row('Min match score', esc(s.min_match_score)) +
+        row('Blacklist companies', chips(s.blacklist_companies)) +
+        row('Blacklist JD words', chips(s.blacklist_keywords))
+    ) +
+    section('Applicant', row('Name', esc(p.name)) + row('Email', esc(p.email)) + row('Location', esc(p.location))) +
+    section('Run mode', row('Dry run', yesno(bot.dry_run)) + row('Max applications', esc(bot.max_applications))) +
+    section('Beyond Easy Apply (external ATS)',
+        row('Enabled', yesno(ext.enabled)) + row('Auto-submit external', yesno(ext.submit)) + row('Max pages', esc(ext.max_pages))) +
+    section('Resume', row('Mode', esc(r.mode)) + row('Your resume file', esc(r.static_resume_path||'(generated per job)'))) +
+    section('Salary band', row('Min', sal.min_annual?money(sal.min_annual):'—') + row('Max', sal.max_annual?money(sal.max_annual):'—')) +
+    section('Experience-fit gate', row('Enabled', yesno(fit.enabled)) + row('Min score to apply', esc(fit.min_score||0)) + row('Skip verdicts', chips(fit.skip_recommendations))) +
+    section('AI', row('Provider', esc(llm.provider)) + row('Field model', esc(llm.field_model)) + row('Resume model', esc(llm.resume_model)) + row('Key configured', yesno(llm.configured))) +
+    '</div>' +
+    '<div class="muted" style="margin-top:12px;font-size:12px;">Edit these in <code>config/settings.yaml</code> (and <code>config/*.local.yaml</code>), or override roles/locations on the CLI with <code>-k</code>/<code>-l</code>. Restart the run to apply.</div>';
+}
+
 function renderRuns(rows){
   if(!rows.length){ document.getElementById('runs').innerHTML='<div class="empty">No runs recorded yet.</div>'; return; }
   const body = rows.map(r=>`<tr>
@@ -346,7 +495,7 @@ function renderErrors(rows){
 
 function showTab(t){
   document.querySelectorAll('.tab').forEach(el=>el.classList.toggle('active', el.dataset.tab===t));
-  ['apps','fit','runs','errors'].forEach(id=>document.getElementById(id).classList.toggle('hidden', id!==t));
+  ['apps','fit','config','runs','errors'].forEach(id=>document.getElementById(id).classList.toggle('hidden', id!==t));
 }
 
 loadAll();

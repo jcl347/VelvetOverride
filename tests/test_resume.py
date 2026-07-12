@@ -86,18 +86,23 @@ class TestResumeBuilder:
         template = TEMPLATES_DIR / "default.html.j2"
         assert template.exists()
 
-    def test_build_html(self, sample_resume_data, tmp_path):
+    def test_build_produces_pdf(self, sample_resume_data, tmp_path):
         from velvetoverride.resume.builder import ResumeBuilder
 
         builder = ResumeBuilder(output_dir=tmp_path)
         path = builder.build(sample_resume_data, "test_resume")
 
+        # build() must always return a real .pdf (never an unusable .html that
+        # LinkedIn would reject as a resume).
+        assert path.endswith(".pdf")
         assert Path(path).exists()
+        assert Path(path).stat().st_size > 0
 
-        # If PDF was generated, check the intermediate HTML instead
-        html_path = tmp_path / "test_resume.html"
-        assert html_path.exists(), "Intermediate HTML should always be written"
-        content = html_path.read_text()
+    def test_render_html_contains_data(self, sample_resume_data, tmp_path):
+        from velvetoverride.resume.builder import ResumeBuilder
+
+        builder = ResumeBuilder(output_dir=tmp_path)
+        content = builder.render_html(sample_resume_data)
         assert "Jane" in content
         assert "Doe" in content
         assert "Python" in content

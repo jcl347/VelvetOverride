@@ -14,18 +14,28 @@ bot:
   # Capture a screenshot at each form step (for human review)
   capture_screenshots: true
   screenshots_dir: "screenshots"
-  # ── Beyond Easy Apply ──
-  # When a job is NOT Easy Apply, follow the "Apply" button to the company's
-  # site (Workday/Greenhouse/Lever/...) and navigate it dynamically with the
-  # LLM instead of skipping. Set false to only do LinkedIn Easy Apply.
-  external_apply: true
-  # Max pages to walk on an external application before giving up
-  external_max_pages: 8
   # Easy Apply form walking: how many steps before giving up, and how many
   # times to retry a step that isn't advancing (red validation error) before
   # recording the error and moving on to the next job.
   max_form_steps: 20
   max_stuck_retries: 4
+
+# ─── Beyond Easy Apply (external company ATS) ─────────────────
+# When a job is NOT LinkedIn Easy Apply, follow the "Apply" button to the
+# company's own site (Workday / Greenhouse / Lever / Ashby / ...) and navigate
+# it dynamically with the LLM, filling fields + uploading your resume.
+#
+# IMPORTANT: to actually ENCOUNTER external jobs you must also set
+# `search.easy_apply_only: false` below — otherwise the search only returns
+# Easy Apply postings. Many external ATS require creating an account, which the
+# bot cannot do; those are recorded as needs_review for you to finish by hand.
+external_apply:
+  enabled: true
+  # false = fill the external form but stop BEFORE the final submit (safer;
+  #         you review and click submit). true = attempt to submit.
+  submit: false
+  # Max pages to walk on an external application before giving up
+  max_pages: 8
 
 # ─── Job Search Filters ────────────────────────────────────────
 search:
@@ -41,7 +51,8 @@ search:
     - "Data Engineer"
   locations:
     - "Seattle, Washington, United States"
-  # Filter to Easy Apply only
+  # Filter to Easy Apply only. Set false to ALSO surface external-ATS jobs
+  # (requires external_apply.enabled: true to actually apply to them).
   easy_apply_only: true
   # Sort newest-first so 24h results surface reliably
   sort_by: "date"
@@ -152,10 +163,17 @@ llm:
 
 # ─── Resume Configuration ──────────────────────────────────────
 resume:
+  # mode:
+  #   "tailored" — generate a per-job PDF from your profile (default), keyword-
+  #                aligned to each JD. Requires an LLM key for best results.
+  #   "static"   — always upload YOUR OWN resume file (static_resume_path); no
+  #                generation. Use this to bring your own polished resume.
+  mode: "tailored"
+  # Path to your own resume PDF/DOCX. Used directly in "static" mode, and as the
+  # fallback in "tailored" mode if generation fails. Absolute or repo-relative.
+  static_resume_path: ""
   # Template to use (filename without extension in src/velvetoverride/resume/templates/)
   template: "default"
-  # Output format: "html" (weasyprint) or "latex" (pdflatex)
-  output_format: "html"
   # Target ATS keyword coverage (0.0 - 1.0)
   target_keyword_coverage: 0.70
   # ── Tailoring guardrails ──

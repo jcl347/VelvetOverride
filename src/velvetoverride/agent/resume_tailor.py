@@ -129,13 +129,21 @@ class ResumeTailor:
             tailored_summary, scored_bullets, keywords, job_title
         )
 
-        # Step 5: Generate PDF — named "<First_Last>_resume_<Company>"
+        # Step 5: Generate PDF — "<First_Last>_resume_<Company>_<TitleSlug>" so
+        # two different roles at the same company don't overwrite each other.
         personal = self._config.personal
         name = f"{personal.get('first_name', '')}_{personal.get('last_name', '')}".strip("_") or "Resume"
-        safe_company = "_".join(
-            "".join(c for c in word if c.isalnum()) for word in company.split()
-        ).strip("_") or "Company"
+
+        def _slug(s: str, limit: int = 40) -> str:
+            return "_".join(
+                "".join(c for c in word if c.isalnum()) for word in s.split()
+            ).strip("_")[:limit]
+
+        safe_company = _slug(company) or "Company"
+        safe_title = _slug(job_title)
         filename = f"{name}_resume_{safe_company}"
+        if safe_title:
+            filename += f"_{safe_title}"
         pdf_path = self._builder.build(resume_data, filename)
 
         # Step 6: ATS score

@@ -111,8 +111,10 @@ class LLMClient:
 
     def _complete_openai(self, prompt: str, model: str, max_tokens: int) -> str:
         messages = [{"role": "user", "content": prompt}]
-        # Newer models (gpt-5, o-series) require max_completion_tokens and
-        # reject custom temperature; try the modern param first, then fall back.
+        # Newer models (gpt-5, o-series) require max_completion_tokens; older ones
+        # want max_tokens. Try the modern param first, but ONLY fall back when the
+        # error is specifically about that unsupported param — otherwise a
+        # transient/rate-limit error would be masked and retried wrongly.
         try:
             resp = self._client.chat.completions.create(
                 model=model,
@@ -120,7 +122,11 @@ class LLMClient:
                 messages=messages,
             )
         except Exception as e:  # noqa: BLE001
-            log.warning("llm.openai_retry", error=str(e)[:120], model=model)
+            msg = str(e).lower()
+            if "max_completion_tokens" not in msg and "max_tokens" not in msg \
+                    and "unsupported" not in msg and "unknown" not in msg:
+                raise  # real error (rate limit, auth, network) — don't mask it
+            log.warning("llm.openai_param_retry", error=str(e)[:120], model=model)
             resp = self._client.chat.completions.create(
                 model=model,
                 max_tokens=max_tokens,

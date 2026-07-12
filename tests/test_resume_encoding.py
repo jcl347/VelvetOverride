@@ -38,11 +38,11 @@ def test_yaml_loads_as_utf8_not_cp1252(tmp_path):
 
 
 def test_em_dash_survives_pdf_render(tmp_path):
-    """The em dash must reach the HTML that gets rendered, intact."""
+    """The em dash must reach the rendered HTML intact (no mojibake)."""
     b = ResumeBuilder(output_dir=tmp_path)
     path = b.build(_data(), "encoding_test")
     assert path.endswith(".pdf"), "expected a PDF (is a PDF engine installed?)"
-    html = (tmp_path / "encoding_test.html").read_text(encoding="utf-8")
+    html = b.render_html(_data())
     assert MOJIBAKE not in html
     assert "Predictor — 79% accuracy" in html
 
@@ -55,11 +55,19 @@ def test_trademark_and_accents_do_not_crash(tmp_path):
     assert path.endswith(".pdf")
 
 
-def test_html_sidecar_written_as_utf8(tmp_path):
+def test_rendered_html_is_utf8_clean(tmp_path):
     b = ResumeBuilder(output_dir=tmp_path)
-    b.build(_data(), "utf8_test")
-    html = (tmp_path / "utf8_test.html").read_text(encoding="utf-8")
+    html = b.render_html(_data())
     assert "—" in html  # readable UTF-8, not cp1252-mangled
+
+
+def test_build_never_returns_html(tmp_path):
+    """build() must return a .pdf, never the intermediate HTML."""
+    b = ResumeBuilder(output_dir=tmp_path)
+    path = b.build(_data(), "nohtml_test")
+    assert path.endswith(".pdf")
+    # And it should not leave a stray .html sidecar behind
+    assert not (tmp_path / "noml_test.html").exists()
 
 
 def test_project_link_is_embedded(tmp_path):

@@ -37,6 +37,8 @@ SUBMIT_SELECTOR = (
     'button[data-control-name="submit_unify"]'
 )
 
+_RESUME_EXTS = {".pdf", ".doc", ".docx"}
+
 NEXT_SELECTOR = (
     'button[aria-label*="Continue to next step"], '
     'button[aria-label*="Review your application"], '
@@ -105,7 +107,7 @@ class ApplicationFlow:
             # Distinguish Easy Apply from external "Apply" (opens company site)
             is_easy = await self._is_easy_apply()
             if await easy_apply_btn.count() == 0 or not is_easy:
-                if self._config.bot.get("external_apply", True):
+                if self._external_cfg()["enabled"]:
                     log.info("apply.external_flow", url=listing.url)
                     return await self._apply_external(listing, resume_path)
                 log.warning("apply.no_easy_apply_button", url=listing.url)
@@ -183,8 +185,20 @@ class ApplicationFlow:
 
                     await self._click_submit()
                     await random_delay(2.0, 4.0)
-                    log.info("apply.submitted", company=listing.company, title=listing.title)
-                    return self._make_record(listing, ApplicationStatus.APPLIED)
+                    # VERIFY the submission actually went through — don't record
+                    # APPLIED just because we clicked. If no confirmation appears,
+                    # the submit was likely blocked by a validation error.
+                    if await self._submission_confirmed():
+                        log.info("apply.submitted", company=listing.company, title=listing.title)
+                        await self._dismiss_modal()
+                        return self._make_record(listing, ApplicationStatus.APPLIED)
+                    # Not confirmed — read any error and keep walking the form
+                    errs2 = await self._fix_validation_errors(fields, listing, modal)
+                    if errs2:
+                        last_errors = errs2
+                    log.warning("apply.submit_unconfirmed", company=listing.company,
+                                errors=errs2[:2] if errs2 else [])
+                    # fall through: loop will re-detect and try again / stuck-detect
 
                 elif await self._has_next_button():
                     await self._click_next()
@@ -362,6 +376,46 @@ class ApplicationFlow:
             num = num.split(".")[0]
         return num
 
+    def _external_cfg(self) -> dict:
+        """Merged external-apply config (new `external_apply:` section wins,
+        with backward-compat for the old `bot.external_apply` keys)."""
+        ext = self._config.settings.get("external_apply", {}) or {}
+        bot = self._config.bot
+        return {
+            "enabled": ext.get("enabled", bot.get("external_apply", True)),
+            "submit": ext.get("submit", False),
+            "max_pages": int(ext.get("max_pages", bot.get("external_max_pages", 8))),
+        }
+
+    async def _submission_confirmed(self) -> bool:
+        """Detect that an Easy Apply submission actually completed.
+
+        LinkedIn shows a "Your application was sent" / "Application submitted"
+        post-apply modal, and the Submit/Review buttons disappear. Returns True
+        if we see a confirmation OR the apply form is gone.
+        """
+        try:
+            body = (await self._page.locator("body").inner_text(timeout=3000) or "").lower()
+        except Exception:
+            body = ""
+        markers = (
+            "application sent", "your application was sent", "application submitted",
+            "applied", "your application has been submitted", "premium",
+        )
+        # "premium" alone is too weak; require a real confirmation phrase
+        confirm_phrases = [m for m in markers if m != "premium"]
+        if any(m in body for m in confirm_phrases):
+            return True
+        # Or: the Easy Apply modal / submit button is gone (form closed on submit)
+        try:
+            modal = self._page.locator('div[data-test-modal-id="easy-apply-modal"]')
+            submit = self._page.locator(SUBMIT_SELECTOR)
+            if await modal.count() == 0 and await submit.count() == 0:
+                return True
+        except Exception:
+            pass
+        return False
+
     async def _is_easy_apply(self) -> bool:
         """True if the current job uses in-app Easy Apply (not an external site)."""
         btn = self._page.locator(
@@ -384,8 +438,12 @@ class ApplicationFlow:
         via the hybrid solver → upload the resume → pick the button that advances
         the form → repeat, until it submits, completes, or gets stuck.
         """
+        ext_cfg = self._external_cfg()
         dry_run = self._config.bot.get("dry_run", True)
-        max_pages = int(self._config.bot.get("external_max_pages", 8))
+        # External submit is gated by BOTH not-dry-run AND external_apply.submit,
+        # so external forms can be filled-but-not-submitted even in live mode.
+        allow_external_submit = (not dry_run) and ext_cfg["submit"]
+        max_pages = ext_cfg["max_pages"]
         llm = getattr(self._solver, "_llm", None)
 
         # Find and click the external apply button, capturing any new tab
@@ -400,10 +458,12 @@ class ApplicationFlow:
 
         context = self._page.context
         ext_page = self._page
+        opened_tab = None  # a new tab we open (so we can close it afterwards)
         try:
             async with context.expect_page(timeout=8000) as new_page_info:
                 await apply_btn.first.click()
             ext_page = await new_page_info.value
+            opened_tab = ext_page
             await ext_page.wait_for_load_state("domcontentloaded", timeout=20000)
             log.info("apply.external_new_tab", url=ext_page.url)
         except Exception:
@@ -411,6 +471,8 @@ class ApplicationFlow:
             await random_delay(2.0, 4.0)
             pages = context.pages
             ext_page = pages[-1] if pages else self._page
+            if ext_page is not self._page:
+                opened_tab = ext_page
             log.info("apply.external_same_tab", url=ext_page.url)
 
         orig_page = self._page
@@ -434,8 +496,11 @@ class ApplicationFlow:
                         f"External application ({'filled, not submitted' if dry_run else 'submitted'}) at {ext_page.url}",
                     )
 
-                # Fill everything we can on this page
-                fields = await detect_form_fields(ext_page)
+                # Fill everything we can on this page — scoped to the primary
+                # application form so we don't touch unrelated page inputs
+                # (search boxes, newsletter signups, cookie banners).
+                form_scope = await self._external_form_scope(ext_page)
+                fields = await detect_form_fields(ext_page, scope=form_scope)
                 await self._fill_fields(fields, listing)
                 await random_delay(1.0, 2.0)
 
@@ -446,21 +511,27 @@ class ApplicationFlow:
                 if llm and buttons:
                     choice = llm.choose_next_action(
                         buttons, listing.title, listing.company,
-                        page_summary=page_summary, allow_submit=not dry_run,
+                        page_summary=page_summary, allow_submit=allow_external_submit,
                     )
                 if not choice:
-                    choice = self._heuristic_next_button(buttons, allow_submit=not dry_run)
+                    choice = self._heuristic_next_button(buttons, allow_submit=allow_external_submit)
 
+                # Only a real terminal action counts as "submit". A bare "Apply"
+                # on an ATS landing page STARTS the form and must be clickable
+                # even when we won't submit, so it is NOT treated as final submit.
                 is_submit = choice and any(
                     k in choice.lower() for k in ("submit", "send application", "finish")
                 )
 
-                # In dry-run, stop before the final submit but record that we filled it
-                if is_submit and dry_run:
-                    log.info("apply.external_dry_run_stop", company=listing.company, button=choice)
+                # If we're not allowed to submit (dry-run OR external_apply.submit
+                # is false), stop before the final submit and record that we filled it.
+                if is_submit and not allow_external_submit:
+                    reason = "dry run" if dry_run else "external_apply.submit is false"
+                    log.info("apply.external_fill_only", company=listing.company, button=choice, reason=reason)
+                    status = ApplicationStatus.DRY_RUN if dry_run else ApplicationStatus.NEEDS_REVIEW
                     return self._make_record(
-                        listing, ApplicationStatus.DRY_RUN,
-                        f"External application filled, stopped before '{choice}' (dry run)",
+                        listing, status,
+                        f"External application filled, stopped before '{choice}' ({reason})",
                     )
 
                 if not choice:
@@ -493,6 +564,40 @@ class ApplicationFlow:
             return self._make_record(listing, ApplicationStatus.FAILED, f"External flow error: {e}")
         finally:
             self._page = orig_page
+            # Close the tab we opened so tabs don't leak and a stale tab isn't
+            # mistakenly picked up on the next job.
+            if opened_tab is not None and opened_tab is not orig_page:
+                try:
+                    await opened_tab.close()
+                except Exception:
+                    pass
+
+    async def _external_form_scope(self, page):
+        """Locator for the primary application form on an external ATS page.
+
+        Prefers a <form> containing a file input or the most inputs; falls back
+        to None (whole page) if nothing obvious is found.
+        """
+        try:
+            forms = page.locator("form")
+            n = await forms.count()
+            if n == 0:
+                return None
+            best, best_score = None, -1
+            for i in range(min(n, 8)):
+                f = forms.nth(i)
+                try:
+                    inputs = await f.locator("input, select, textarea").count()
+                    has_file = await f.locator('input[type="file"]').count()
+                    score = inputs + (50 if has_file else 0)
+                    if score > best_score:
+                        best, best_score = f, score
+                except Exception:
+                    continue
+            # Only scope if the form actually has fields worth filling
+            return best if best_score >= 2 else None
+        except Exception:
+            return None
 
     async def _collect_button_labels(self, page) -> list[str]:
         """Collect visible button / submit-input / link-button labels on a page."""
@@ -580,7 +685,11 @@ class ApplicationFlow:
             # Resume / file upload — use the tailored resume path directly
             if field.field_type == FieldType.FILE_UPLOAD:
                 resume_path = getattr(self, "_resume_path", None)
-                if resume_path and Path(resume_path).exists():
+                ext = Path(resume_path).suffix.lower() if resume_path else ""
+                # NEVER upload a non-resume file: LinkedIn/ATS reject anything
+                # but PDF/DOC/DOCX, which would silently block submission while
+                # we log "uploaded". Flag it for review instead.
+                if resume_path and Path(resume_path).exists() and ext in _RESUME_EXTS:
                     try:
                         await field.locator.set_input_files(resume_path)
                         log.info("apply.resume_uploaded", path=resume_path, label=field.label)
@@ -593,6 +702,19 @@ class ApplicationFlow:
                         ))
                     except Exception as e:
                         log.warning("apply.resume_upload_failed", error=str(e), label=field.label)
+                else:
+                    log.warning(
+                        "apply.resume_not_uploadable",
+                        path=resume_path, ext=ext,
+                        msg="no valid PDF/DOC resume to upload — flagging for review",
+                    )
+                    self._questions.append(QuestionRecord(
+                        question_text=field.label or "Resume upload",
+                        field_type="file_upload",
+                        answer_given=f"MISSING/INVALID RESUME ({ext or 'none'})",
+                        answer_source="skip",
+                        needs_review=True,
+                    ))
                 continue
 
             # Skip if already has a value (pre-filled)

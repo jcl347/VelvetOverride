@@ -242,9 +242,11 @@ VelvetOverride/
    suffer from detection issues and brittle selectors. Patchright provides the modern
    Playwright API with undetectable browser automation built in.
 
-3. **Claude API over OpenAI:** Stronger instruction-following for form field reasoning,
-   native tool use support for structured output, and extended thinking for complex JD
-   analysis. Sonnet for fast field Q&A, Opus for resume tailoring and complex reasoning.
+3. **OpenAI (ChatGPT) by default (Anthropic optional):** The LLM layer is
+   provider-agnostic (`llm.provider`). OpenAI is the default because of its free
+   daily token-sharing bucket — `gpt-4.1-mini` for high-volume field Q&A / keyword
+   scoring (huge free allotment) and `gpt-4.1` for the low-volume resume tailoring.
+   Anthropic Claude is a drop-in alternative via the same interface.
 
 4. **Resume-per-application:** Research consistently shows that tailored resumes
    dramatically outperform generic ones. The YAML + Jinja2 pipeline makes this
@@ -411,8 +413,9 @@ cp config/.env.example config/.env
 # Edit config/.env with your LinkedIn credentials and OPENAI_API_KEY
 
 # 4. Customize your profile
-# Edit config/profile.yaml with your real experience, skills, education
-# Edit config/answers.yaml to set your predetermined answers
+# Personal data goes in gitignored *.local.yaml (never the committed templates):
+cp config/profile.yaml config/profile.local.yaml   # then edit with your real data
+cp config/answers.yaml config/answers.local.yaml    # your predetermined answers
 # Edit config/settings.yaml to set job search filters
 
 # 5. Run in dry-run mode first (fills forms but does NOT submit)
@@ -625,21 +628,48 @@ tracking dashboard, and set up a small daily scheduled run.
   the `errors` CLI and the dashboard.
 
 **Localhost dashboard (`web/dashboard.py`):**
-- Flask app + JSON API (`/api/summary|applications|runs|errors`) with a single-page
-  dark UI: summary cards (applications, needs-review, errors, tokens, est. cost) and
-  tabs for applications, runs, and errors. Auto-refreshes every 15s. `velvetoverride
-  dashboard` launches it (default http://127.0.0.1:5000).
+- Flask app + JSON API (`/api/summary|applications|fit|config|runs|errors`) with a
+  single-page dark UI: summary cards (applied, failed, skipped, errors, avg fit) and
+  tabs for Applications, Experience fit, **Config & search** (the roles/locations
+  searched + all effective settings, secret-redacted), Runs, and Errors.
+  Auto-refreshes every 15s. `velvetoverride dashboard` launches it (default
+  http://127.0.0.1:5000).
 
 **Daily scheduling (Windows):**
 - `scripts/register_schedule.ps1` registers a per-user Task Scheduler job at the
   local-time equivalent of 9:00 AM Pacific (DST-aware). `scripts/run_daily.ps1`
   runs one pipeline pass and logs to `data/logs/`.
 
-**Real profile data:** `config/profile.yaml` populated from the owner's actual resume
-(experience, education, publications, skills, per-tech years).
+**Profile data:** committed `config/profile.yaml` is a safe **placeholder**; real
+data lives in gitignored `config/profile.local.yaml` (the loader prefers `*.local.yaml`).
 
 **Test suite: 88 tests** (+18): adds `test_urls.py` (7 — job-ID/URL normalization) and
 `test_dedup_and_tracking.py` (11 — job_id dedup, error logging, token accounting).
+
+### Phase 9: Full-repo review, hardening, and configurability (DONE)
+
+A multi-agent review (9 subsystems + docs, adversarially verified) surfaced 50
+confirmed bugs. All HIGH/MEDIUM and most LOW were fixed, plus three features.
+
+**Critical fixes:** never upload a non-PDF resume (build() now raises instead of
+returning `.html`; xhtml2pdf is a core dep); Easy Apply **submit is verified**
+before recording APPLIED; manual/SSO login no longer wipes itself (passive cookie
+probe instead of re-navigating); DB migration indexes created after their columns
+(no crash on upgraded DBs). **Reliability:** match/salary re-checked on the full JD;
+failed jobs stay retryable through fuzzy dedup; multi-location searched separately;
+external tab closed + scoped to the form; radio-group labels; word-boundary
+years-matching (C++/C#); config-driven location preference (de-hardcoded Seattle);
+consent-only checkbox ticking; adverse yes/no never auto-"Yes"; proxy credentials;
+UTF-8 CSV/JSON export; dashboard XSS/quote escaping + path-traversal fix.
+
+**Features:** (1) dashboard **Config & search** tab + `/api/config` showing the
+roles/locations searched and all effective settings (secret-redacted); (2)
+**beyond Easy Apply** promoted to a first-class `external_apply:` section
+(enabled / submit / max_pages); (3) **bring-your-own-resume** via `resume.mode:
+static` + `resume.static_resume_path`, and multi-user onboarding via the
+`*.local.yaml` precedence + placeholder guard.
+
+**Test suite: 172 tests.**
 
 ---
 

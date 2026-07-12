@@ -10,20 +10,20 @@ with a localhost web dashboard for human review.
 ## Features
 
 - **7-type form field detection** — text, numeric, radio, dropdown, checkbox, file upload, textarea
-- **5-tier hybrid field solver** — learned answers → YAML config → profile data → EEO handler → LLM
+- **Hybrid field solver** — learned answers → config → profile → location/EEO/consent → LLM fallback
 - **OpenAI (ChatGPT) by default** — provider-agnostic LLM layer; tuned for OpenAI's free daily token-sharing bucket
-- **Token usage tracking** — every run records tokens + estimated cost; `token-test` estimates use before you run
-- **Per-job resume tailoring** — keyword alignment only; experience bullets & impact metrics stay verbatim
-- **Robust de-duplication** — never re-applies to the same job by canonical LinkedIn **Job ID**, normalized URL, or fuzzy title+company
-- **Multi-role search** — each target role (Data Scientist, Software Engineer, AI Engineer, ML Engineer) is searched separately and merged
+- **ChatGPT experience-fit check** — honest "am I really a lead?" verdict per job (seniority, gaps, apply/skip), judged from your *real* titles and dates; optional gate
+- **Per-job resume tailoring** — keyword-aligned summary + per-role technologies; bullets stay verbatim. Or **bring your own resume** (`resume.mode: static`)
+- **Beyond Easy Apply** — optionally follows non-Easy-Apply jobs to the company ATS (Workday/Greenhouse/Lever) and fills them with the LLM (`external_apply` section)
+- **Robust de-duplication** — never re-applies to a job by canonical LinkedIn **Job ID**, normalized URL, or fuzzy title+company; failed jobs stay retryable
+- **Multi-role × multi-location search** — each role and location searched separately and merged, full-list scroll + pagination
 - **24-hour recency** — applies to fresh postings, sorted newest-first
-- **Answer memory** — learns from human corrections, converges toward zero API cost over time
-- **Job match scoring** — applies to best-fit jobs first by scoring JDs against your skill profile
+- **Submit verification** — confirms the application actually went through before recording it as applied
+- **Job match scoring + salary band filter** — re-checked against the full JD before applying
 - **Anti-detection** — Patchright (undetected Playwright), persistent Chrome sessions, human-like timing
-- **Salary extraction + band filtering** — regex salary parsing, annual/hourly normalization, target-range filter
-- **CAPTCHA handling** — 3 strategies: manual (VNC), 2Captcha API, CapSolver API
-- **Error tracking** — errors are recorded per run and surfaced in the dashboard and `errors` CLI
-- **Localhost dashboard** — Flask web UI showing applications, runs, errors, and token usage
+- **CAPTCHA / SSO login** — manual (default), 2Captcha, or CapSolver; Google/SSO logins persist after a one-time manual sign-in
+- **Localhost dashboard** — Flask web UI: applications, experience-fit, **config & searched roles**, runs, errors, clickable resumes
+- **Reusable by anyone** — personal data in gitignored `*.local.yaml`; a placeholder guard prevents applying with template data
 - **Scheduling** — one-command Windows Task Scheduler setup (every 5 days at 9 AM PST by default)
 - **Dry-run mode** — fills forms without submitting for safe calibration
 
@@ -246,18 +246,24 @@ LINKEDIN_PASSWORD=your_real_password
 OPENAI_API_KEY=sk-proj-your-key-here
 ```
 
-Then customize your profile and preferences:
+Then customize your profile and preferences. **Put personal data in the
+gitignored `*.local.yaml` copies**, never the committed templates:
 ```bash
-nano config/profile.yaml     # Your real experience, skills, education
-nano config/answers.yaml      # Your predetermined answers (work auth, etc.)
-nano config/settings.yaml     # Target job roles, locations, filters
+cp config/profile.yaml config/profile.local.yaml   # your experience, skills, projects
+cp config/answers.yaml config/answers.local.yaml    # your predetermined answers
+nano config/profile.local.yaml   # real name, contact, experience
+nano config/settings.yaml         # target roles, locations, filters (or settings.local.yaml)
 ```
+
+The loader always prefers `*.local.yaml` over the committed placeholder, and the
+bot **refuses to run** while the profile still looks like the "Jane Doe"
+placeholder — so you can't accidentally apply with template data.
 
 #### 5. Run tests to verify installation
 
 ```bash
 pytest tests/ -v
-# All 88 tests should pass
+# All 172 tests should pass
 ```
 
 ---
@@ -551,27 +557,36 @@ journalctl -u velvetoverride.service -f
 | `bot.max_applications` | Max applications per session (default: 25) |
 | `bot.delay_min` / `delay_max` | Seconds between applications (default: 5-18) |
 | `bot.capture_screenshots` | Save screenshots of each form step |
-| `search.keywords` | Job titles to search for |
-| `search.locations` | Target locations |
-| `search.easy_apply_only` | Only show Easy Apply jobs (default: true) |
-| `search.experience_levels` | Filter: internship, entry_level, associate, mid_senior, director, executive |
-| `search.remote` | Filter: on_site, remote, hybrid |
-| `search.blacklist_companies` | Companies to skip |
-| `search.blacklist_keywords` | JD keywords that trigger skip |
-| `search.min_match_score` | Minimum job-profile match score (0-100) |
-| `salary.min_annual` | Minimum annual salary to apply (null = no minimum) |
-| `salary.max_annual` | Maximum annual salary to apply (null = no maximum) |
-| `captcha.strategy` | CAPTCHA strategy: `manual`, `2captcha`, or `capsolver` |
-| `captcha.api_key` | API key for 2Captcha/CapSolver (also reads `CAPTCHA_API_KEY` env var) |
-| `captcha.timeout` | Seconds to wait for CAPTCHA resolution (default: 300) |
-| `browser.channel` | `chrome` (real Chrome — stealthier) |
-| `browser.headless` | `false` for VNC/desktop; Xvfb handles "headless" |
-| `llm.provider` | `openai` (ChatGPT, default) or `anthropic` |
-| `llm.field_model` | Model for field Q&A (default: `gpt-4.1-mini`) |
-| `llm.resume_model` | Model for resume tailoring (default: `gpt-4.1`) |
-| `resume.reorder_bullets` | `false` = keep original bullet order (impacts stay in place) |
-| `resume.max_bullets_per_job` | `null` = keep every bullet (nothing dropped) |
+| `bot.max_form_steps` / `max_stuck_retries` | Easy Apply walker limits before giving up |
+| `search.keywords` | Roles to search — each is a separate search, merged + de-duped |
+| `search.locations` | Locations — each searched separately (crossed with keywords) |
+| `search.easy_apply_only` | `true` = Easy Apply only; `false` to also surface external-ATS jobs |
+| `search.date_posted` | `any` / `past_month` / `past_week` / `past_24h` |
+| `search.sort_by` | `date` (newest first) or `relevance` |
+| `search.max_pages` | Result pages to walk per keyword (default: 5) |
+| `search.job_types` | full_time, part_time, contract, temporary, internship |
+| `search.experience_levels` | internship, entry_level, associate, mid_senior, director, executive |
+| `search.remote` | on_site, remote, hybrid |
+| `search.blacklist_companies` / `blacklist_keywords` | Companies / JD words that trigger skip |
+| `search.min_match_score` | Minimum job-profile match score (0-100), re-checked on the full JD |
+| **`external_apply.enabled`** | Follow non-Easy-Apply jobs to the company ATS and fill them |
+| **`external_apply.submit`** | `false` = fill but stop before final submit (safer); `true` = submit |
+| **`external_apply.max_pages`** | Max ATS pages to walk before giving up (default: 8) |
+| **`fit.enabled`** | Run the ChatGPT experience-fit check on each job |
+| **`fit.min_score`** | Skip jobs scoring below this (0 = record only, don't gate) |
+| **`fit.skip_recommendations`** | e.g. `["skip"]` to skip roles it deems a clear mismatch |
+| `salary.min_annual` / `max_annual` | Salary band (null = no limit) |
+| `captcha.strategy` / `api_key` / `timeout` | `manual`/`2captcha`/`capsolver`; timeout also covers manual login |
+| `browser.channel` / `headless` / `keep_open` | Real Chrome; headed for stealth; keep window open after run |
+| `llm.provider` / `field_model` / `resume_model` | `openai` (default) or `anthropic`; per-task models |
+| `llm.fit_model` | Model for the experience-fit judgement (default: field model) |
+| **`resume.mode`** | `tailored` (per-job PDF) or `static` (upload your own file) |
+| **`resume.static_resume_path`** | Path to your own PDF/DOCX (static mode, or tailoring fallback) |
+| `resume.reorder_bullets` / `max_bullets_per_job` | Bullet ordering/trimming (text always verbatim) |
 | `resume.target_keyword_coverage` | ATS keyword target (default: 0.70 = 70%) |
+
+Personal data belongs in gitignored `config/profile.local.yaml` / `answers.local.yaml`
+/ `settings.local.yaml` — the loader prefers these over the committed placeholders.
 
 ### config/profile.yaml
 

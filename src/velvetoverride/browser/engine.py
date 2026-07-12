@@ -52,8 +52,20 @@ class BrowserEngine:
 
         proxy_url = self._config.proxy_url
         if proxy_url:
-            launch_kwargs["proxy"] = {"server": proxy_url}
-            log.info("browser.proxy_configured", proxy=proxy_url.split("@")[-1])
+            # Playwright wants credentials as separate keys, NOT inline in the
+            # server URL, or auth silently fails.
+            import urllib.parse
+            parsed = urllib.parse.urlparse(proxy_url)
+            server = f"{parsed.scheme}://{parsed.hostname}"
+            if parsed.port:
+                server += f":{parsed.port}"
+            proxy_cfg = {"server": server}
+            if parsed.username:
+                proxy_cfg["username"] = urllib.parse.unquote(parsed.username)
+            if parsed.password:
+                proxy_cfg["password"] = urllib.parse.unquote(parsed.password)
+            launch_kwargs["proxy"] = proxy_cfg
+            log.info("browser.proxy_configured", server=server, auth=bool(parsed.username))
 
         viewport = bcfg.get("viewport")
         if viewport:
@@ -97,11 +109,20 @@ class BrowserEngine:
         log.debug("browser.screenshot", path=str(path))
 
     async def close(self) -> None:
-        if self._context:
-            await self._context.close()
+        # Always stop playwright even if context.close() raises, or the Chrome
+        # process + node driver leak.
+        try:
+            if self._context:
+                await self._context.close()
+        except Exception as e:
+            log.warning("browser.context_close_error", error=str(e)[:100])
+        finally:
             self._context = None
             self._page = None
-        if self._playwright:
-            await self._playwright.stop()
-            self._playwright = None
-        log.info("browser.closed")
+            if self._playwright:
+                try:
+                    await self._playwright.stop()
+                except Exception as e:
+                    log.warning("browser.playwright_stop_error", error=str(e)[:100])
+                self._playwright = None
+            log.info("browser.closed")

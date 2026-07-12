@@ -12,7 +12,7 @@ dependencies = [
     "pyyaml>=6.0",
     "python-dotenv>=1.0.0",
     "jinja2>=3.1.0",
-    "weasyprint>=62.0",
+    "xhtml2pdf>=0.2.11",
     "structlog>=24.0.0",
     "click>=8.1.0",
     "thefuzz>=0.22.0",
@@ -27,6 +27,12 @@ dev = [
 ]
 anthropic = [
     "anthropic>=0.42.0",
+]
+# WeasyPrint gives higher-fidelity PDFs but needs GTK/Pango/Cairo native libs
+# (painful on Windows). xhtml2pdf (a core dep) is the pure-Python fallback and
+# works everywhere, so weasyprint is optional.
+weasyprint = [
+    "weasyprint>=62.0",
 ]
 latex = [
     "latex>=0.7.0",

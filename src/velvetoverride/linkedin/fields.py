@@ -199,6 +199,51 @@ async def _get_select_options(select: Locator) -> list[str]:
     return texts
 
 
+async def _get_radio_group_label(radio, page: Page) -> str:
+    """Resolve the QUESTION for a radio group (not one option's text).
+
+    Prefers the group container's label (fieldset legend, role=group aria-label,
+    or the LinkedIn form-element label span); only falls back to the per-radio
+    label as a last resort so the solver matches the actual question.
+    """
+    # 1) fieldset > legend
+    try:
+        fieldset = radio.locator("xpath=ancestor::fieldset[1]")
+        if await fieldset.count() > 0:
+            legend = fieldset.locator("legend")
+            if await legend.count() > 0:
+                t = (await legend.first.text_content() or "").strip()
+                if t:
+                    return " ".join(t.split())
+    except Exception:
+        pass
+    # 2) role=group aria-label
+    try:
+        grp = radio.locator("xpath=ancestor::*[@role='group'][1]")
+        if await grp.count() > 0:
+            al = (await grp.first.get_attribute("aria-label") or "").strip()
+            if al:
+                return " ".join(al.split())
+    except Exception:
+        pass
+    # 3) LinkedIn form-element wrapper label
+    try:
+        wrapper = radio.locator(
+            "xpath=ancestor::*[contains(@class,'fb-dash-form-element') "
+            "or contains(@class,'jobs-easy-apply-form-element')][1]"
+        )
+        if await wrapper.count() > 0:
+            lbl = wrapper.locator("label, span[data-test-form-builder-radio-button-form-component__title], legend")
+            if await lbl.count() > 0:
+                t = (await lbl.first.text_content() or "").strip()
+                if t:
+                    return " ".join(t.split())
+    except Exception:
+        pass
+    # 4) last resort: the individual radio's label
+    return await _get_field_label(radio, page)
+
+
 async def _detect_radio_groups(root, page: Page) -> list[FormField]:
     """Detect radio button groups and return them as single fields."""
     groups: dict[str, FormField] = {}
@@ -211,13 +256,7 @@ async def _detect_radio_groups(root, page: Page) -> list[FormField]:
 
         name = await radio.get_attribute("name") or f"radio_group_{i}"
         if name not in groups:
-            label = await _get_field_label(radio, page)
-            # Try to get the group label from a parent fieldset or form-group
-            fieldset = radio.locator("xpath=ancestor::fieldset")
-            if await fieldset.count() > 0:
-                legend = fieldset.locator("legend")
-                if await legend.count() > 0:
-                    label = (await legend.text_content() or label).strip()
+            label = await _get_radio_group_label(radio, page)
 
             groups[name] = FormField(
                 label=label,

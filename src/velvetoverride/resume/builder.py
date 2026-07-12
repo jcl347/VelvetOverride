@@ -14,6 +14,21 @@ log = get_logger(__name__)
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 
 
+def available_pdf_engine() -> str | None:
+    """Return the name of the first importable PDF engine, or None."""
+    try:
+        import weasyprint  # noqa: F401
+        return "weasyprint"
+    except Exception:
+        pass
+    try:
+        from xhtml2pdf import pisa  # noqa: F401
+        return "xhtml2pdf"
+    except Exception:
+        pass
+    return None
+
+
 class ResumeBuilder:
     """Generates PDF resumes from structured data using Jinja2 templates."""
 
@@ -28,6 +43,18 @@ class ResumeBuilder:
         self._output_dir.mkdir(parents=True, exist_ok=True)
         self._output_format = output_format
 
+        # Fail loudly at startup if no PDF engine works, rather than silently
+        # degrading to unusable .html resumes at apply time.
+        engine = available_pdf_engine()
+        if engine:
+            log.info("resume.pdf_engine_ready", engine=engine)
+        else:
+            log.error(
+                "resume.no_pdf_engine",
+                msg="No PDF engine importable — resumes cannot be generated. "
+                    "Install xhtml2pdf (pip install xhtml2pdf) or weasyprint.",
+            )
+
         self._jinja_env = jinja2.Environment(
             loader=jinja2.FileSystemLoader(str(TEMPLATES_DIR)),
             autoescape=jinja2.select_autoescape(["html"]),
@@ -35,34 +62,25 @@ class ResumeBuilder:
             lstrip_blocks=True,
         )
 
+    def render_html(self, resume_data: dict[str, Any]) -> str:
+        """Render the resume template to an HTML string (no file written)."""
+        template_file = f"{self._template_name}.html.j2"
+        template = self._jinja_env.get_template(template_file)
+        return template.render(**resume_data)
+
     def build(self, resume_data: dict[str, Any], filename: str) -> str:
         """Render the resume template and generate a PDF.
 
-        Returns the path to the generated PDF.
+        Returns the path to the generated PDF. Raises RuntimeError if no PDF
+        engine is available — we must NEVER return a .html path here, because
+        LinkedIn/ATS resume uploads reject non-PDF/DOC files and the application
+        would silently fail while logging success.
         """
-        template_file = f"{self._template_name}.html.j2"
-        template = self._jinja_env.get_template(template_file)
-
-        html_content = template.render(**resume_data)
-
-        # Write intermediate HTML (explicit UTF-8; Windows defaults to cp1252)
-        html_path = self._output_dir / f"{filename}.html"
-        html_path.write_text(html_content, encoding="utf-8")
-
-        # Generate PDF from HTML
+        html_content = self.render_html(resume_data)
         pdf_path = self._output_dir / f"{filename}.pdf"
-        try:
-            self._html_to_pdf(html_content, pdf_path)
-            log.info("resume.built", format="pdf", path=str(pdf_path))
-            return str(pdf_path)
-        except Exception as e:
-            log.warning(
-                "resume.pdf_fallback",
-                error=str(e),
-                msg="WeasyPrint not available; using HTML output",
-            )
-            log.info("resume.built", format="html", path=str(html_path))
-            return str(html_path)
+        self._html_to_pdf(html_content, pdf_path)  # raises if no engine
+        log.info("resume.built", format="pdf", path=str(pdf_path))
+        return str(pdf_path)
 
     def _html_to_pdf(self, html_content: str, output_path: Path) -> None:
         """Convert HTML to PDF.
