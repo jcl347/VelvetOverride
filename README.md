@@ -7,46 +7,97 @@ questions using a hybrid config + AI approach (OpenAI/ChatGPT by default, Claude
 generates per-job tailored resumes, and tracks every application in a local SQLite database
 with a localhost web dashboard for human review.
 
-## ⚡ First-time setup (5 minutes)
+## 🚀 Getting started
+
+New here? Follow these six steps — most people are running in about 10 minutes.
+Everything with your personal data goes in `*.local.yaml` files that are **gitignored**,
+so you never commit your name, resume, or keys.
+
+### Step 1 — Install
 
 ```bash
-# 1. Install
-pip install -e ".[dev]"
-patchright install chrome
-
-# 2. Credentials (this file is gitignored)
-cp config/.env.example config/.env
-#   Edit config/.env: add LINKEDIN_EMAIL and OPENAI_API_KEY.
-#   Using Google/SSO to sign in to LinkedIn? Leave LINKEDIN_PASSWORD blank —
-#   the bot opens Chrome on the first run and waits for you to sign in by hand,
-#   then remembers the session.
-
-# 3. YOUR profile (personal data stays out of git — the *.local.yaml files are gitignored)
-cp config/profile.yaml config/profile.local.yaml
-#   Edit config/profile.local.yaml with your name, contact, experience, skills.
-#   (The bot REFUSES to run while it still says "Jane Doe".)
-
-# 4. Choose how your resume is submitted — pick ONE, in config/settings.yaml:
-#    (a) Bring your OWN resume file (simplest):
-#          resume:
-#            mode: "static"
-#            static_resume_path: "C:/path/to/your_resume.pdf"   # PDF/DOC/DOCX
-#    (b) Let the bot generate a tailored PDF per job (default):
-#          resume:
-#            mode: "tailored"
-
-# 5. Pick target roles + locations in config/settings.yaml (search.keywords /
-#    search.locations), or override on the CLI with -k / -l.
-
-# 6. Try it safely, then go live, then watch it
-velvetoverride run --dry-run          # fills forms but does NOT submit
-velvetoverride run --live             # submit applications
-velvetoverride dashboard              # http://127.0.0.1:5000  (progress + config + fit)
+pip install -e ".[dev]"      # needs Python 3.11+
+patchright install chrome    # installs the real Chrome the bot drives
 ```
 
-> **Full setup details** are in the [Setup](#setup) section below. **First live run:**
-> watch the Chrome window that opens and complete any LinkedIn login / CAPTCHA / 2FA once —
-> the session is remembered after that.
+### Step 2 — Add your credentials
+
+```bash
+cp config/.env.example config/.env
+```
+
+Open `config/.env` and fill in:
+
+- `LINKEDIN_EMAIL` — your LinkedIn login email.
+- `LINKEDIN_PASSWORD` — **leave this blank if you sign in with Google/SSO.** On the
+  first run the bot opens Chrome and simply waits for you to sign in by hand
+  (including any 2FA); it then remembers the session, so you only do this once.
+- `OPENAI_API_KEY` — get one at <https://platform.openai.com/api-keys>. *(Optional if
+  you set `resume.mode: static` and `fit.enabled: false` — then no AI key is needed.)*
+
+### Step 3 — Fill in your profile 🪄 (let Claude Code do it from your resume)
+
+Your details live in `config/profile.local.yaml`. Create it and let **Claude Code**
+populate it straight from your existing resume — no manual YAML editing:
+
+```bash
+cp config/profile.yaml config/profile.local.yaml
+```
+
+Then open this folder in [Claude Code](https://claude.com/claude-code) (or Cursor / any
+agentic IDE), drop in your resume, and ask:
+
+> *"Read my resume `Jordan_Resume.pdf` and fill in `config/profile.local.yaml` with my
+> real name, contact info, work experience (tag each bullet's `skills:`), education,
+> skills, and `technology_experience` years. Don't invent anything."*
+
+Claude Code reads the PDF and writes the structured profile for you. Review it, and
+you're done. *(Prefer to do it yourself? Just edit `config/profile.local.yaml` by hand.)*
+
+> 🔒 The bot **refuses to run** while the profile still says "Jane Doe", so you can't
+> accidentally apply with the placeholder.
+
+### Step 4 — Choose how your resume gets submitted
+
+In `config/settings.yaml`, pick **one** under `resume:`:
+
+```yaml
+resume:
+  mode: "static"                          # (a) upload YOUR OWN resume file — simplest
+  static_resume_path: "C:/Users/you/resume.pdf"   # PDF / DOC / DOCX
+```
+```yaml
+resume:
+  mode: "tailored"                        # (b) generate a per-job PDF, keyword-aligned (default)
+```
+
+### Step 5 — Pick target roles and locations
+
+In `config/settings.yaml`, set `search.keywords` (each role is searched separately) and
+`search.locations`. You can also override them per-run on the command line:
+
+```bash
+velvetoverride run --live -k "AI Engineer" -k "ML Engineer" -l "Seattle" -l "Remote"
+```
+
+### Step 6 — Run it, and watch it on the dashboard
+
+```bash
+velvetoverride run --dry-run    # fills forms but does NOT submit — always try this first
+velvetoverride run --live       # submit applications for real
+velvetoverride dashboard        # opens the tracker at http://127.0.0.1:5000
+```
+
+> 🖥️ **What you'll see (the display).** The bot drives a **real, visible Chrome window**
+> on your desktop — watch it work, and on the very first run complete any LinkedIn
+> login / CAPTCHA / 2FA in that window (once). Separately, `velvetoverride dashboard`
+> starts a small **local website** at **http://127.0.0.1:5000** (it has to be running to
+> load) with tabs for **Applications**, **Experience fit**, **Config & search** (exactly
+> which roles/locations it's targeting), **Runs**, and **Errors** — plus one-click access
+> to every resume it submitted. It only listens on your own machine.
+
+Full details, deployment options, and every setting are in the [Setup](#setup) and
+[Configuration Reference](#configuration-reference) sections below.
 
 ## Features
 
