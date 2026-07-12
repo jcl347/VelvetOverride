@@ -116,7 +116,7 @@ Full details, deployment options, and every setting are in the [Setup](#setup) a
 - **CAPTCHA / SSO login** — manual (default), 2Captcha, or CapSolver; Google/SSO logins persist after a one-time manual sign-in
 - **Localhost dashboard** — Flask web UI: applications, experience-fit, **config & searched roles**, runs, errors, clickable resumes
 - **Reusable by anyone** — personal data in gitignored `*.local.yaml`; a placeholder guard prevents applying with template data
-- **Scheduling** — one-command Windows Task Scheduler setup (every 5 days at 9 AM PST by default)
+- **Scheduling** — one-command Windows Task Scheduler setup (every 2 days at 9 AM PST by default)
 - **Dry-run mode** — fills forms without submitting for safe calibration
 
 ## Setup
@@ -214,10 +214,10 @@ velvetoverride review [--approve]             Review / approve LLM-answered ques
 velvetoverride tailor TITLE COMPANY JD_FILE   Generate a tailored resume (no apply)
 ```
 
-### Scheduled run (Windows, every 5 days at 9 AM PST)
+### Scheduled run (Windows, every 2 days at 9 AM PST)
 
 ```powershell
-# Registers a per-user task at the local equivalent of 9:00 AM Pacific, every 5 days
+# Registers a per-user task at the local equivalent of 9:00 AM Pacific, every 2 days
 powershell -ExecutionPolicy Bypass -File scripts\register_schedule.ps1
 # Custom cadence (e.g. daily):  ... register_schedule.ps1 -DaysInterval 1
 

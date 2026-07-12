@@ -442,15 +442,15 @@ velvetoverride errors [--limit N]            # Show recorded errors from runs
 velvetoverride tailor TITLE COMPANY JD_FILE  # Generate a tailored resume only
 ```
 
-### Scheduled run (Windows, every 5 days at 9 AM PST)
+### Scheduled run (Windows, every 2 days at 9 AM PST)
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts\register_schedule.ps1  # register (every 5 days)
+powershell -ExecutionPolicy Bypass -File scripts\register_schedule.ps1  # register (every 2 days)
 Start-ScheduledTask -TaskName "VelvetOverride"                          # test it now
 ```
 
 The task computes the local-time equivalent of 9:00 AM Pacific, runs every
-`-DaysInterval` days (default 5), and executes `scripts\run_daily.ps1`, which
+`-DaysInterval` days (default 2), and executes `scripts\run_daily.ps1`, which
 respects `settings.yaml` and logs to `data/logs/`.
 
 ### Configuration Files

@@ -4,7 +4,7 @@
 # the local-time equivalent of 9:00 AM America/Los_Angeles so it stays correct
 # even if your PC is in another timezone (and across PST/PDT).
 #
-# Runs every -DaysInterval days (default 5).
+# Runs every -DaysInterval days (default 2).
 #
 # Usage (run in PowerShell, no admin needed for a per-user task):
 #   powershell -ExecutionPolicy Bypass -File scripts\register_schedule.ps1
@@ -15,7 +15,7 @@
 
 param(
     [string]$TaskName = "VelvetOverride",
-    [int]$DaysInterval = 5,    # run once every N days
+    [int]$DaysInterval = 2,    # run once every N days
     [int]$PacificHour = 9,     # 9 AM Pacific
     [int]$PacificMinute = 0
 )
