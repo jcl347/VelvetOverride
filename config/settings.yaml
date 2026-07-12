@@ -61,7 +61,10 @@ search:
   # page is mostly jobs we've already applied to.
   max_pages: 5
   # Experience levels: internship, entry_level, associate, mid_senior, director, executive
+  # (entry_level = junior, associate = mid-level)
   experience_levels:
+    - "entry_level"
+    - "associate"
     - "mid_senior"
     - "director"
   # Date posted: any, past_month, past_week, past_24h
@@ -77,15 +80,15 @@ search:
   # Job types: full_time, part_time, contract, temporary, internship
   job_types:
     - "full_time"
-  # Words in JD that trigger automatic skip
-  blacklist_keywords:
-    - "clearance required"
-    - "polygraph"
+  # Words in JD that trigger automatic skip (empty = don't skip on JD words)
+  blacklist_keywords: []
   # Companies to skip
   blacklist_companies:
     - "Revature"
-  # Minimum job match score (0-100) to proceed with application
-  min_match_score: 40
+  # Minimum job match score (0-100) to proceed with application. Scoring is
+  # crude keyword-overlap, so real jobs score low (~10-35); keep this low and
+  # rely on the ChatGPT experience-fit check (fit: block) as the quality gate.
+  min_match_score: 12
 
 # ─── Experience Fit (ChatGPT) ─────────────────────────────────
 # Before applying, ChatGPT compares the job's seniority + hard requirements

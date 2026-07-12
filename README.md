@@ -7,6 +7,47 @@ questions using a hybrid config + AI approach (OpenAI/ChatGPT by default, Claude
 generates per-job tailored resumes, and tracks every application in a local SQLite database
 with a localhost web dashboard for human review.
 
+## ⚡ First-time setup (5 minutes)
+
+```bash
+# 1. Install
+pip install -e ".[dev]"
+patchright install chrome
+
+# 2. Credentials (this file is gitignored)
+cp config/.env.example config/.env
+#   Edit config/.env: add LINKEDIN_EMAIL and OPENAI_API_KEY.
+#   Using Google/SSO to sign in to LinkedIn? Leave LINKEDIN_PASSWORD blank —
+#   the bot opens Chrome on the first run and waits for you to sign in by hand,
+#   then remembers the session.
+
+# 3. YOUR profile (personal data stays out of git — the *.local.yaml files are gitignored)
+cp config/profile.yaml config/profile.local.yaml
+#   Edit config/profile.local.yaml with your name, contact, experience, skills.
+#   (The bot REFUSES to run while it still says "Jane Doe".)
+
+# 4. Choose how your resume is submitted — pick ONE, in config/settings.yaml:
+#    (a) Bring your OWN resume file (simplest):
+#          resume:
+#            mode: "static"
+#            static_resume_path: "C:/path/to/your_resume.pdf"   # PDF/DOC/DOCX
+#    (b) Let the bot generate a tailored PDF per job (default):
+#          resume:
+#            mode: "tailored"
+
+# 5. Pick target roles + locations in config/settings.yaml (search.keywords /
+#    search.locations), or override on the CLI with -k / -l.
+
+# 6. Try it safely, then go live, then watch it
+velvetoverride run --dry-run          # fills forms but does NOT submit
+velvetoverride run --live             # submit applications
+velvetoverride dashboard              # http://127.0.0.1:5000  (progress + config + fit)
+```
+
+> **Full setup details** are in the [Setup](#setup) section below. **First live run:**
+> watch the Chrome window that opens and complete any LinkedIn login / CAPTCHA / 2FA once —
+> the session is remembered after that.
+
 ## Features
 
 - **7-type form field detection** — text, numeric, radio, dropdown, checkbox, file upload, textarea
