@@ -134,3 +134,54 @@ class TestRunQuestionAudit:
         ]
         assert len(flagged) == 1
         assert flagged[0]["question_text"] == "Zip code"
+
+
+class TestCoverLetters:
+    def test_captures_textarea_and_cover_letter_source(self, db):
+        run_id = db.start_run(dry_run=False, max_apps=5)
+        _seed(db, run_id, [
+            QuestionRecord("First name", "text", "Jordan", "profile"),   # excluded
+            QuestionRecord("Cover letter", "textarea", "Dear team, I am...", "cover_letter"),
+            QuestionRecord("Summary", "textarea", "I'm excited about this role because...", "llm"),
+        ])
+        letters = db.get_cover_letters()
+        fields = {r["question_text"] for r in letters}
+        assert "Cover letter" in fields
+        assert "Summary" in fields
+        assert "First name" not in fields  # short profile answer is not a letter
+
+    def test_captures_long_llm_text(self, db):
+        run_id = db.start_run(dry_run=False, max_apps=5)
+        long = "I am looking for a challenging role that leverages my experience " * 3
+        _seed(db, run_id, [
+            QuestionRecord("I'm looking for…", "text", long, "llm"),
+            QuestionRecord("Phone", "text", "585-305-3419", "profile"),  # excluded
+        ])
+        letters = db.get_cover_letters()
+        fields = {r["question_text"] for r in letters}
+        assert "I'm looking for…" in fields
+        assert "Phone" not in fields
+
+    def test_excludes_empty_answers(self, db):
+        run_id = db.start_run(dry_run=False, max_apps=5)
+        _seed(db, run_id, [QuestionRecord("Additional info", "textarea", "", "llm")])
+        assert db.get_cover_letters() == []
+
+    def test_endpoint_returns_letters(self, tmp_path):
+        from velvetoverride.web import dashboard
+        db_path = tmp_path / "endpoint.db"
+        d = TrackingDB(db_path)
+        d.connect()
+        run_id = d.start_run(dry_run=False, max_apps=5)
+        _seed(d, run_id, [
+            QuestionRecord("Cover letter", "textarea", "Dear hiring team, ...", "cover_letter"),
+        ])
+        d.close()
+        app = dashboard.create_app(str(db_path))
+        resp = app.test_client().get("/api/cover_letters")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert len(data) == 1
+        assert data[0]["company"] == "Acme"
+        assert data[0]["text"].startswith("Dear hiring team")
+        assert data[0]["field"] == "Cover letter"

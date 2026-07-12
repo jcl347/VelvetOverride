@@ -332,6 +332,29 @@ class TrackingDB:
         )
         self.conn.commit()
 
+    def get_cover_letters(self, limit: int = 200) -> list[dict]:
+        """Long-form narrative answers the bot wrote (cover letters, summaries,
+        'why interested', 'I'm looking for…'), with job context, newest first.
+
+        Captures anything tagged ``cover_letter``, any textarea answer, or a
+        long (>150 char) LLM answer — the prose a human would want to read and
+        reuse.
+        """
+        rows = self.conn.execute(
+            """SELECT q.id, q.question_text, q.field_type, q.answer_given,
+                      q.answer_source, a.company, a.job_title, a.job_url,
+                      a.applied_at
+               FROM questions q JOIN applications a ON q.application_id = a.id
+               WHERE ( q.answer_source = 'cover_letter'
+                       OR q.field_type = 'textarea'
+                       OR (q.answer_source = 'llm' AND LENGTH(q.answer_given) > 150) )
+                 AND TRIM(COALESCE(q.answer_given, '')) != ''
+               ORDER BY a.applied_at DESC, q.id DESC
+               LIMIT ?""",
+            (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
     def is_already_applied(self, job_url: str, job_id: str | None = None) -> bool:
         """Check if we've already SUCCESSFULLY applied to this job.
 

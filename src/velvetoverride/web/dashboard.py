@@ -190,6 +190,25 @@ def create_app(db_path: str = "data/applications.db", resume_dir: str | Path | N
         finally:
             db.close()
 
+    @app.route("/api/cover_letters")
+    def api_cover_letters() -> Any:
+        # The narrative text the bot generated per job (cover letters, summaries,
+        # motivation answers) so you can read and reuse them.
+        db = _db(app.config["DB_PATH"])
+        try:
+            rows = db.get_cover_letters()
+            return jsonify([{
+                "company": r.get("company", ""),
+                "job_title": r.get("job_title", ""),
+                "job_url": r.get("job_url", ""),
+                "field": r.get("question_text", ""),
+                "source": r.get("answer_source", ""),
+                "text": r.get("answer_given", ""),
+                "applied_at": r.get("applied_at", ""),
+            } for r in rows])
+        finally:
+            db.close()
+
     @app.route("/resume/<path:name>")
     def resume_file(name: str):
         # Serve a generated resume PDF for review. Path-traversal safe: resolve
@@ -285,6 +304,19 @@ _PAGE = r"""
     border: 1px solid rgba(255,107,107,0.35); border-radius: 6px; padding: 2px 7px; font-size: 12px; }
   .src-pill { display: inline-block; background: var(--panel2); border: 1px solid var(--border);
     border-radius: 6px; padding: 1px 7px; font-size: 11.5px; color: var(--muted); }
+  .letters-wrap { display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 14px; }
+  .letter-card { position: relative; background: var(--panel); border: 1px solid var(--border);
+    border-radius: 12px; padding: 14px 16px; }
+  .letter-head { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; margin-bottom: 8px; }
+  .letter-co { font-weight: 700; font-size: 14px; }
+  .letter-meta { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; flex-shrink: 0; }
+  .letter-field { font-size: 11.5px; color: var(--accent); max-width: 160px; text-align: right; }
+  .letter-text { white-space: pre-wrap; font-size: 13px; line-height: 1.5; color: #dbe4ee;
+    max-height: 160px; overflow-y: auto; padding: 8px 10px; background: var(--panel2);
+    border-radius: 8px; border: 1px solid var(--border); }
+  .copy-btn { margin-top: 8px; font-size: 12px; background: var(--panel2); color: var(--muted);
+    border: 1px solid var(--border); border-radius: 6px; padding: 3px 10px; cursor: pointer; }
+  .copy-btn:hover { color: var(--fg); border-color: var(--accent); }
   .hidden { display: none; }
   .refresh { font-size: 12px; color: var(--muted); cursor: pointer; }
   .empty { padding: 30px; text-align: center; color: var(--muted); }
@@ -312,6 +344,7 @@ _PAGE = r"""
     <div class="tab active" data-tab="apps" onclick="showTab('apps')">Applications</div>
     <div class="tab" data-tab="fit" onclick="showTab('fit')">Experience fit</div>
     <div class="tab" data-tab="feedback" onclick="showTab('feedback')">Field feedback</div>
+    <div class="tab" data-tab="letters" onclick="showTab('letters')">Cover letters</div>
     <div class="tab" data-tab="config" onclick="showTab('config')">Config &amp; search</div>
     <div class="tab" data-tab="runs" onclick="showTab('runs')">Runs</div>
     <div class="tab" data-tab="errors" onclick="showTab('errors')">Errors</div>
@@ -319,6 +352,7 @@ _PAGE = r"""
   <div id="apps"></div>
   <div id="fit" class="hidden"></div>
   <div id="feedback" class="hidden"></div>
+  <div id="letters" class="hidden"></div>
   <div id="config" class="hidden"></div>
   <div id="runs" class="hidden"></div>
   <div id="errors" class="hidden"></div>
@@ -336,9 +370,10 @@ async function getJSON(url){
 }
 
 async function loadAll(){
-  const [sum, apps, fit, feedback, runs, errors, cfg] = await Promise.all([
+  const [sum, apps, fit, feedback, letters, runs, errors, cfg] = await Promise.all([
     getJSON('/api/summary'), getJSON('/api/applications'), getJSON('/api/fit'),
-    getJSON('/api/feedback'), getJSON('/api/runs'), getJSON('/api/errors'), getJSON('/api/config'),
+    getJSON('/api/feedback'), getJSON('/api/cover_letters'),
+    getJSON('/api/runs'), getJSON('/api/errors'), getJSON('/api/config'),
   ]);
   const banner = document.getElementById('errbanner');
   if (sum == null && apps == null){
@@ -351,6 +386,7 @@ async function loadAll(){
   renderApps(apps || []);
   renderFit(fit || [], (sum && sum.fit) || {});
   renderFeedback(feedback || []);
+  renderLetters(letters || []);
   renderConfig(cfg || {});
   renderRuns(runs || []);
   renderErrors(errors || []);
@@ -484,6 +520,37 @@ function renderFeedback(rows){
      <th>Source</th><th>Type</th><th>Problem</th></tr></thead><tbody>${body}</tbody></table>`;
 }
 
+function copyText(btn){
+  const t = btn.parentElement.querySelector('.letter-text').textContent;
+  navigator.clipboard.writeText(t).then(()=>{ btn.textContent='Copied'; setTimeout(()=>btn.textContent='Copy', 1500); });
+}
+window.copyText = copyText;
+
+function renderLetters(rows){
+  const el = document.getElementById('letters');
+  if(!rows.length){
+    el.innerHTML = '<div class="empty">No cover letters yet. When a job asks for a cover letter, summary, or &ldquo;why are you interested&rdquo;, the bot writes one from your background + the JD and it is saved here to read and reuse.</div>';
+    return;
+  }
+  const legend = `<div class="fit-legend"><b>${rows.length}</b> generated passages saved
+      <div class="muted" style="margin-top:4px;">Cover letters, summaries, and motivation answers the bot wrote per job. Click a card to expand; use Copy to reuse the text.</div></div>`;
+  const cards = rows.map((r,i)=>`<div class="letter-card">
+      <div class="letter-head">
+        <div>
+          <div class="letter-co">${esc(r.company)||'&mdash;'}</div>
+          <div class="muted">${r.job_url?`<a href="${esc(r.job_url)}" target="_blank">${esc(r.job_title)}<\/a>`:esc(r.job_title)}</div>
+        </div>
+        <div class="letter-meta">
+          <span class="letter-field">${esc(r.field)}</span>
+          <span class="src-pill">${esc(r.source||'')}</span>
+        </div>
+      </div>
+      <div class="letter-text">${esc(r.text)}</div>
+      <button class="copy-btn" onclick="copyText(this)">Copy</button>
+    </div>`).join('');
+  el.innerHTML = legend + `<div class="letters-wrap">${cards}</div>`;
+}
+
 function chips(arr){
   if(!arr || !arr.length) return '<span class="muted">—</span>';
   return arr.map(x=>`<span class="chip">${esc(x)}</span>`).join(' ');
@@ -561,7 +628,7 @@ function renderErrors(rows){
 
 function showTab(t){
   document.querySelectorAll('.tab').forEach(el=>el.classList.toggle('active', el.dataset.tab===t));
-  ['apps','fit','feedback','config','runs','errors'].forEach(id=>document.getElementById(id).classList.toggle('hidden', id!==t));
+  ['apps','fit','feedback','letters','config','runs','errors'].forEach(id=>document.getElementById(id).classList.toggle('hidden', id!==t));
 }
 
 loadAll();

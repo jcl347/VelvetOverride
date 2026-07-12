@@ -110,7 +110,7 @@ class FieldSolver:
         # Make a compelling case from the applicant's real background + the JD.
         cover = self._check_cover_letter(field, job_description, job_title, company)
         if cover is not None:
-            return cover, "llm", True
+            return cover, "cover_letter", True
 
         # ── Tier 6: LLM fallback ──
         if self._llm:
