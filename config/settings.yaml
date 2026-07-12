@@ -68,8 +68,9 @@ search:
     - "mid_senior"
     - "director"
   # Date posted: any, past_month, past_week, past_24h
-  # Set to 24h so the bot only applies to fresh postings.
-  date_posted: "past_24h"
+  # past_week gives many more results per role (multiple pages to walk) than
+  # 24h; set back to past_24h if you only want same-day-fresh postings.
+  date_posted: "past_week"
   # Remote filter: on_site, remote, hybrid.
   # "Remote or in Seattle" — location above is Seattle, so on_site/hybrid are
   # Seattle-based; remote adds work-from-anywhere roles.
