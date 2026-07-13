@@ -17,7 +17,8 @@ param(
     [string]$TaskName = "VelvetOverride",
     [int]$DaysInterval = 2,    # run once every N days
     [int]$PacificHour = 9,     # 9 AM Pacific
-    [int]$PacificMinute = 0
+    [int]$PacificMinute = 0,
+    [int]$StartInDays = 1      # first run is this many days out (1 = tomorrow)
 )
 
 $ErrorActionPreference = "Stop"
@@ -28,17 +29,18 @@ $RunScript = Join-Path $Root "scripts\run_daily.ps1"
 try {
     $pacificTz = [System.TimeZoneInfo]::FindSystemTimeZoneById("Pacific Standard Time")
     $todayPacific = [System.TimeZoneInfo]::ConvertTime((Get-Date), $pacificTz)
-    $pacificTarget = Get-Date -Year $todayPacific.Year -Month $todayPacific.Month -Day $todayPacific.Day `
+    # First-run Pacific date is StartInDays out (1 = tomorrow), at the target hour.
+    $startPacific = $todayPacific.AddDays($StartInDays)
+    $pacificTarget = Get-Date -Year $startPacific.Year -Month $startPacific.Month -Day $startPacific.Day `
         -Hour $PacificHour -Minute $PacificMinute -Second 0
-    # Interpret that wall-clock as Pacific, convert to local
+    # Interpret that wall-clock as Pacific, convert to local (keeps the full date)
     $pacificTargetUtc = [System.TimeZoneInfo]::ConvertTimeToUtc(
         [DateTime]::SpecifyKind($pacificTarget, [DateTimeKind]::Unspecified), $pacificTz)
-    $localTarget = $pacificTargetUtc.ToLocalTime()
-    $TriggerTime = Get-Date -Hour $localTarget.Hour -Minute $localTarget.Minute -Second 0
-    Write-Host "9:00 AM Pacific = $($localTarget.ToString('HH:mm')) local time on this machine."
+    $TriggerTime = $pacificTargetUtc.ToLocalTime()
+    Write-Host "First run: $($TriggerTime.ToString('yyyy-MM-dd HH:mm')) local (9:00 AM Pacific)."
 } catch {
     Write-Warning "Could not resolve Pacific timezone; scheduling at 09:00 local instead."
-    $TriggerTime = Get-Date -Hour 9 -Minute 0 -Second 0
+    $TriggerTime = (Get-Date -Hour 9 -Minute 0 -Second 0).AddDays($StartInDays)
 }
 
 $Action = New-ScheduledTaskAction -Execute "powershell.exe" `
@@ -50,5 +52,5 @@ $Settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -DontStopOnIdleEnd 
 Register-ScheduledTask -TaskName $TaskName -Action $Action -Trigger $Trigger `
     -Settings $Settings -Description "LinkedIn application run every $DaysInterval days (VelvetOverride)" -Force
 
-Write-Host "Registered scheduled task '$TaskName' (every $DaysInterval days at $($TriggerTime.ToString('HH:mm')) local)."
+Write-Host "Registered scheduled task '$TaskName' (every $DaysInterval days, first run $($TriggerTime.ToString('yyyy-MM-dd HH:mm')) local)."
 Write-Host "Test it now with:  Start-ScheduledTask -TaskName '$TaskName'"
