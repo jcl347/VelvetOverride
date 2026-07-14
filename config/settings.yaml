@@ -30,7 +30,10 @@ bot:
 # Easy Apply postings. Many external ATS require creating an account, which the
 # bot cannot do; those are recorded as needs_review for you to finish by hand.
 external_apply:
-  enabled: true
+  # false = Easy Apply ONLY. Non-Easy-Apply jobs are skipped rather than
+  # attempting the company ATS (which often can't reach the real form and
+  # can't create accounts). Set true to also try external applications.
+  enabled: false
   # false = fill the external form but stop BEFORE the final submit (safer;
   #         you review and click submit). true = attempt to submit.
   submit: false

@@ -558,17 +558,19 @@ class ApplicationFlow:
 
                 if not choice:
                     # Stuck: no field progress and nothing to click (often a login/account wall)
-                    reason = "External flow stuck (login/account wall or unknown form)"
+                    # NOT submitted → FAILED (honest + retryable), never NEEDS_REVIEW,
+                    # which counts as applied and would block a real future attempt.
+                    reason = "External flow stuck (login/account wall or unknown form) — NOT submitted"
                     log.warning("apply.external_stuck", company=listing.company, url=ext_page.url, buttons=buttons[:6])
-                    return self._make_record(listing, ApplicationStatus.NEEDS_REVIEW, reason)
+                    return self._make_record(listing, ApplicationStatus.FAILED, reason)
 
                 # Detect a no-progress loop (same URL + same fields + same buttons)
                 signature = (ext_page.url, len(fields), tuple(buttons))
                 if signature == last_signature:
                     log.warning("apply.external_no_progress", company=listing.company, url=ext_page.url)
                     return self._make_record(
-                        listing, ApplicationStatus.NEEDS_REVIEW,
-                        "External flow made no progress (may need manual completion)",
+                        listing, ApplicationStatus.FAILED,
+                        "External flow made no progress — NOT submitted (may need manual completion)",
                     )
                 last_signature = signature
 
@@ -578,8 +580,8 @@ class ApplicationFlow:
 
             log.warning("apply.external_max_pages", company=listing.company)
             return self._make_record(
-                listing, ApplicationStatus.NEEDS_REVIEW,
-                "External application exceeded max pages — may need manual completion",
+                listing, ApplicationStatus.FAILED,
+                "External application exceeded max pages — NOT submitted (may need manual completion)",
             )
         except Exception as e:
             log.error("apply.external_error", error=str(e), company=listing.company)
