@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import random
+import re
 import sys
 from pathlib import Path
 
@@ -257,6 +258,16 @@ async def run_bot(
                         is_fuzzy_dup = True
                         break
             if is_fuzzy_dup:
+                skipped_count += 1
+                continue
+
+            # Title-level seniority exclusion (e.g. skip "Principal" roles) while
+            # still searching all experience levels.
+            excluded = _title_excluded(
+                listing.title, config.search.get("blacklist_title_keywords", [])
+            )
+            if excluded:
+                log.info("bot.skip_title_excluded", title=listing.title, matched=excluded)
                 skipped_count += 1
                 continue
 
@@ -738,6 +749,22 @@ def _find_default_resume(config) -> str | None:
         resumes = sorted(resume_dir.glob("*.pdf"), key=lambda p: p.stat().st_mtime, reverse=True)
         if resumes:
             return str(resumes[0])
+    return None
+
+
+def _title_excluded(title: str, blacklist: list[str]) -> str | None:
+    """Return the matched keyword if the job TITLE contains a blacklisted
+    seniority/word (word-boundary match, so 'lead' won't hit 'leadership' and
+    'principal' won't hit unrelated substrings), else None.
+
+    Used to exclude seniorities the user doesn't want (e.g. 'principal') while
+    keeping all experience levels in the search.
+    """
+    tl = (title or "").lower()
+    for kw in blacklist or []:
+        k = str(kw).lower().strip()
+        if k and re.search(r"\b" + re.escape(k) + r"\b", tl):
+            return k
     return None
 
 

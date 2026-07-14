@@ -2,9 +2,9 @@
 bot:
   # Dry-run mode: fill forms but do NOT submit. Use for calibration.
   dry_run: true
-  # Max applications per session. Kept low for a small daily cadence
-  # (scheduled at 9am PST) and to stay well under detection thresholds.
-  max_applications: 5
+  # Max applications per session. 15 keeps volume up while staying within
+  # the recommended 20-30/session detection-safe ceiling.
+  max_applications: 15
   # Seconds to wait between applications (random within range)
   delay_min: 5
   delay_max: 18
@@ -45,6 +45,7 @@ search:
     - "Data Scientist"
     - "Software Engineer"
     - "Software Developer"
+    - "Junior Software Engineer"
     - "AI Engineer"
     - "Machine Learning Engineer"
     - "Algorithm Engineer"
@@ -68,8 +69,9 @@ search:
     - "mid_senior"
     - "director"
   # Date posted: any, past_month, past_week, past_24h
-  # 24h = only same-day-fresh postings (fast; usually one page per role).
-  date_posted: "past_24h"
+  # past_week gives a much larger pool so higher max_applications can fill;
+  # 24h = only same-day-fresh postings (fast, but pool drains after a run).
+  date_posted: "past_week"
   # Remote filter: on_site, remote, hybrid.
   # "Remote or in Seattle" — location above is Seattle, so on_site/hybrid are
   # Seattle-based; remote adds work-from-anywhere roles.
@@ -82,6 +84,10 @@ search:
     - "full_time"
   # Words in JD that trigger automatic skip (empty = don't skip on JD words)
   blacklist_keywords: []
+  # Words in the job TITLE that trigger a skip (word-boundary match). Used to
+  # drop seniorities you don't want while still searching all experience levels.
+  blacklist_title_keywords:
+    - "principal"
   # Companies to skip
   blacklist_companies:
     - "Revature"
