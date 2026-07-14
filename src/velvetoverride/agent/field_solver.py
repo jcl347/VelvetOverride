@@ -225,13 +225,31 @@ class FieldSolver:
         last = str(p.get("last_name", "")).strip()
         full = f"{first} {last}".strip()
 
-        # Not a person's-name field
+        # NOT the applicant's name — either a non-person "name" (company, file)
+        # or SOMEONE ELSE'S name (a referrer, emergency contact, reference).
+        # These must never receive the applicant's name; returning None lets them
+        # fall through to the LLM, which answers appropriately (e.g. "N/A — not
+        # referred") instead of typing "Limperis" into a referral box.
         if any(x in label for x in (
             "company", "organization", "organisation", "employer", "file",
-            "username", "user name", "reference", "manager", "supervisor",
-            "school", "university", "institution", "product",
+            "username", "user name", "reference", "referred", "referral",
+            "referrer", "who referred", "their ", "his ", "her ", "manager",
+            "supervisor", "school", "university", "institution", "product",
+            "emergency", "next of kin", "spouse", "contact name", "parent",
+            "guardian", "recruiter", "someone", "person who",
         )):
             return None
+
+        # Combined "First and Last Name" / "Full name" / "Legal name" → full name.
+        # Checked BEFORE the individual first/last branches so a combined label
+        # doesn't match "last name" and return only the surname.
+        if ("first" in label and "last" in label and "name" in label) or any(
+            k in label for k in (
+                "full name", "full legal name", "legal name", "complete name",
+                "name in full", "your name", "candidate name", "applicant name",
+            )
+        ) or label.strip() == "name":
+            return full or None
 
         if any(k in label for k in ("first name", "given name", "legal first", "forename")):
             return first or None
@@ -241,9 +259,6 @@ class FieldSolver:
             return ""  # explicit empty — don't let it reach the LLM
         if any(k in label for k in ("preferred name", "nickname", "goes by")):
             return first or None
-        if any(k in label for k in ("full name", "legal name", "your name",
-                                    "candidate name", "applicant name")) or label.strip() == "name":
-            return full or None
         return None
 
     def _check_profile(self, field: FormField) -> str | None:
@@ -261,9 +276,10 @@ class FieldSolver:
         if name is not None:
             return name
 
+        # NOTE: name fields are handled ONLY by _name_answer above — do not add
+        # "first name"/"last name" here, or a non-applicant field like "provide
+        # their first and last name" would naively match and get the surname.
         mappings = {
-            "first name": personal.get("first_name"),
-            "last name": personal.get("last_name"),
             "email": personal.get("email"),
             "phone": personal.get("phone"),
             "city": personal.get("city"),

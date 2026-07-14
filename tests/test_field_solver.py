@@ -198,3 +198,68 @@ class TestFieldSolver:
         learned = solver._answers["learned"]
         assert "What color is the sky?" in learned
         assert learned["What color is the sky?"]["answer"] == "Blue"
+
+
+class TestNameRouting:
+    """Name fields must be identified carefully: combined labels get the full
+    name, and non-applicant/third-party 'name' fields never get the applicant's
+    name (they fall through to the LLM for an appropriate answer)."""
+
+    @pytest.fixture
+    def solver(self, config):
+        return FieldSolver(config, llm=None)
+
+    @pytest.mark.asyncio
+    async def test_first_name(self, solver):
+        answer, source, _ = await solver.solve(_make_field("First Name", FieldType.TEXT))
+        assert answer == "Jane"
+        assert source == "profile"
+
+    @pytest.mark.asyncio
+    async def test_last_name(self, solver):
+        answer, source, _ = await solver.solve(_make_field("Last Name", FieldType.TEXT))
+        assert answer == "Doe"
+
+    @pytest.mark.asyncio
+    async def test_combined_first_and_last_name_gets_full_name(self, solver):
+        # Regression: "First and Last Name" used to return only the surname.
+        answer, source, _ = await solver.solve(_make_field("First and Last Name", FieldType.TEXT))
+        assert answer == "Jane Doe"
+        assert source == "profile"
+
+    @pytest.mark.asyncio
+    async def test_full_name(self, solver):
+        answer, _, _ = await solver.solve(_make_field("Full Name", FieldType.TEXT))
+        assert answer == "Jane Doe"
+
+    @pytest.mark.asyncio
+    async def test_bare_name_label(self, solver):
+        answer, _, _ = await solver.solve(_make_field("Name", FieldType.TEXT))
+        assert answer == "Jane Doe"
+
+    @pytest.mark.asyncio
+    async def test_referral_name_not_applicant(self, solver):
+        # Regression: a referral field asking for someone else's name must NOT
+        # receive the applicant's name. With no LLM it falls through to skip.
+        field = _make_field(
+            "Were you referred to Artera? If so, please provide their first and last name.",
+            FieldType.TEXT,
+        )
+        answer, source, _ = await solver.solve(field)
+        assert answer not in ("Doe", "Jane", "Jane Doe")
+        assert source != "profile"
+
+    @pytest.mark.asyncio
+    async def test_company_name_not_applicant(self, solver):
+        answer, source, _ = await solver.solve(_make_field("Company Name", FieldType.TEXT))
+        assert answer not in ("Doe", "Jane", "Jane Doe")
+
+    @pytest.mark.asyncio
+    async def test_emergency_contact_name_not_applicant(self, solver):
+        answer, source, _ = await solver.solve(_make_field("Emergency contact name", FieldType.TEXT))
+        assert answer not in ("Doe", "Jane", "Jane Doe")
+
+    @pytest.mark.asyncio
+    async def test_reference_name_not_applicant(self, solver):
+        answer, _, _ = await solver.solve(_make_field("Reference full name", FieldType.TEXT))
+        assert answer not in ("Doe", "Jane", "Jane Doe")

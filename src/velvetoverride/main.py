@@ -288,6 +288,10 @@ async def run_bot(
                         log.info("bot.rescored", title=listing.title, score=f"{listing.match_score:.0f}")
                 except Exception as e:
                     log.warning("bot.jd_fetch_error", error=str(e), url=listing.url)
+                    if _is_browser_closed(e):
+                        log.error("bot.browser_closed_aborting",
+                                  remaining=len(listings) - i - 1)
+                        break
 
             # ── Re-apply match + salary gates now that we have the full JD ──
             # (the initial pass ran against an empty description).
@@ -398,6 +402,13 @@ async def run_bot(
                     job_title=listing.title, job_url=listing.url,
                 )
                 failed_count += 1
+                # If the browser/context is gone, every remaining listing will
+                # fail identically — abort the loop instead of logging hundreds
+                # of phantom failures.
+                if _is_browser_closed(e):
+                    log.error("bot.browser_closed_aborting",
+                              remaining=len(listings) - i - 1)
+                    break
                 continue
 
             record.job_id = listing.job_id
@@ -728,6 +739,23 @@ def _find_default_resume(config) -> str | None:
         if resumes:
             return str(resumes[0])
     return None
+
+
+def _is_browser_closed(err: Exception) -> bool:
+    """True if the exception means the browser/page/context is gone.
+
+    Once the browser dies, every remaining listing fails identically, so the
+    apply loop must abort rather than record hundreds of phantom failures.
+    """
+    msg = str(err).lower()
+    return any(s in msg for s in (
+        "target page, context or browser has been closed",
+        "context or browser has been closed",
+        "browser has been closed",
+        "target closed",
+        "page has been closed",
+        "browser closed",
+    ))
 
 
 def _score_listings(listings, config, llm):
