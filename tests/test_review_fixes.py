@@ -163,8 +163,9 @@ def test_years_matches_cpp_and_csharp():
 # ── cover letter / summary routing ──
 
 class _CoverLLM:
-    def generate_cover_letter_snippet(self, title, company, jd, profile):
-        return f"Compelling case for {title} at {company}."
+    def generate_cover_letter_snippet(self, prompt_label, title, company, jd, profile):
+        # Echo the prompt so tests can assert the answer targets the actual question.
+        return f"Answer to {prompt_label!r} for {title} at {company}."
 
 
 def test_cover_letter_field_routed_to_llm():
@@ -174,7 +175,8 @@ def test_cover_letter_field_routed_to_llm():
     fs = FieldSolver(Config(profile={"personal": {"first_name": "J"}}), _CoverLLM())
     f = FormField(label="Cover letter", field_type=FieldType.TEXTAREA, locator=None)
     out = fs._check_cover_letter(f, "JD text", "MLE", "Acme")
-    assert out == "Compelling case for MLE at Acme."
+    # The specific prompt is passed through to the generator (prompt-aware).
+    assert out == "Answer to 'Cover letter' for MLE at Acme."
 
 
 def test_why_interested_routed_to_cover_letter():
@@ -194,3 +196,43 @@ def test_non_cover_field_not_routed():
     fs = FieldSolver(Config(profile={"personal": {}}), _CoverLLM())
     f = FormField(label="Phone number", field_type=FieldType.TEXT, locator=None)
     assert fs._check_cover_letter(f, "JD", "MLE", "Acme") is None
+
+
+def test_cover_letter_is_prompt_aware():
+    """The generator must receive the actual prompt, not a hardcoded question."""
+    from velvetoverride.linkedin.fields import FormField
+    from velvetoverride.tracking.models import FieldType
+    from velvetoverride.agent.field_solver import FieldSolver
+    fs = FieldSolver(Config(profile={"personal": {}}), _CoverLLM())
+    f = FormField(label="Tell us about yourself", field_type=FieldType.TEXTAREA, locator=None)
+    out = fs._check_cover_letter(f, "JD", "MLE", "Acme")
+    assert out == "Answer to 'Tell us about yourself' for MLE at Acme."
+
+
+def test_factual_questions_not_treated_as_cover_letter():
+    """Non-cover-letter questions must NOT get narrative treatment."""
+    from velvetoverride.linkedin.fields import FormField
+    from velvetoverride.tracking.models import FieldType
+    from velvetoverride.agent.field_solver import FieldSolver
+    fs = FieldSolver(Config(profile={"personal": {}}), _CoverLLM())
+    for label in (
+        "How many years of experience do you have with Python?",
+        "What is your desired salary?",
+        "What is your expected start date?",
+        "Are you authorized to work in the US?",
+        "Today's Date",
+        "Describe your experience with Kubernetes",   # specific, not a cover letter
+    ):
+        f = FormField(label=label, field_type=FieldType.TEXTAREA, locator=None)
+        assert fs._check_cover_letter(f, "JD", "MLE", "Acme") is None, label
+
+
+def test_good_candidate_not_excluded_by_date_substring():
+    """'candidate' contains 'date' — must still route as a cover-letter prompt."""
+    from velvetoverride.linkedin.fields import FormField
+    from velvetoverride.tracking.models import FieldType
+    from velvetoverride.agent.field_solver import FieldSolver
+    fs = FieldSolver(Config(profile={"personal": {}}), _CoverLLM())
+    f = FormField(label="What makes you a good fit for this role?",
+                  field_type=FieldType.TEXTAREA, locator=None)
+    assert fs._check_cover_letter(f, "JD", "MLE", "Acme") is not None

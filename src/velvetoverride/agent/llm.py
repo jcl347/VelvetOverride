@@ -557,25 +557,51 @@ Rules:
 
     def generate_cover_letter_snippet(
         self,
+        prompt_label: str,
         job_title: str,
         company: str,
         job_description: str,
         profile_summary: str,
     ) -> str:
-        """Generate a short cover letter / 'why interested' response."""
-        prompt = f"""Write a brief, compelling answer for "Why are you interested in this role?" for a "{job_title}" position at "{company}".
+        """Answer an open-ended application prompt (cover letter, 'why
+        interested', 'tell us about yourself', 'anything else', …) with a
+        compelling narrative that DIRECTLY addresses that specific prompt and is
+        grounded in the applicant's real background.
+
+        ``prompt_label`` is the actual form question so the answer targets it —
+        rather than always answering a hardcoded "why interested".
+        """
+        label = (prompt_label or "").strip() or "Why are you interested in this role?"
+        is_cover_letter = any(
+            k in label.lower() for k in ("cover letter", "letter of interest")
+        )
+        length_rule = (
+            "Write two short paragraphs (a genuine cover letter body)."
+            if is_cover_letter
+            else "Write 3-5 sentences."
+        )
+        prompt = f"""A job applicant must answer this application question:
+
+QUESTION: "{label}"
+
+For the role "{job_title}" at "{company}".
 
 Job description excerpt:
-{job_description[:1200]}
+{job_description[:1400]}
 
-Applicant background:
+Applicant's real background (use ONLY these facts — never invent skills,
+employers, metrics, titles, or credentials):
 {profile_summary}
 
-Rules:
-- 3-4 sentences maximum.
-- Be specific about the company and role.
-- Connect the applicant's real experience to the role. Do not fabricate.
-- Sound genuine, not generic.
-- Return ONLY the answer text."""
+Write the applicant's answer. Requirements:
+- Directly and specifically answer THAT question — do not paste a generic
+  cover letter or answer a different question.
+- Ground every claim in the real background above; cite concrete experience or
+  achievements from it. Never fabricate.
+- Connect the applicant's actual experience to this specific role and company.
+- Be genuine and concrete — no clichés, no flattery, no buzzword padding.
+- {length_rule}
+- Return ONLY the answer text (no preamble, no "Dear Hiring Manager" unless it
+  is explicitly a cover letter)."""
 
-        return self._complete(prompt, self.field_model, 400)
+        return self._complete(prompt, self.field_model, 600)

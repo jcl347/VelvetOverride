@@ -135,22 +135,30 @@ class FieldSolver:
         if self._llm is None:
             return None
         label = field.label.lower()
-        # Never treat a contact/identity field as a cover letter
+        # Never treat a contact/identity/factual field as a cover-letter prompt.
+        # These must be answered precisely (or from profile), not with a
+        # narrative — this is what keeps non-cover-letter questions from getting
+        # an inappropriate essay.
         if any(x in label for x in (
             "name", "email", "phone", "zip", "postal", "city", "state",
             "country", "address", "url", "linkedin", "github", "website",
-            "salary", "date", "code",
+            "salary", "compensation", "how many years", "years of experience",
+            "notice period", "start date", "today's date", "date of birth",
+            "date available", "available date", "postal code", "area code",
+            "willing to", "authorized", "sponsorship", "relocate", "gpa",
         )):
             return None
-        # Broad "why/summary" prompts must be a real multi-line textarea; only an
-        # explicit "cover letter" is accepted on a single-line text input.
+        # Genuine open-ended / motivation prompts that deserve a compelling
+        # narrative. Anything not matching falls through to the plain LLM
+        # answerer, which addresses the specific question without an essay.
         explicit = ("cover letter", "letter of interest")
         cover_kw = explicit + (
             "why are you interested", "why do you want", "why this role",
-            "why this company", "why you", "tell us why", "what interests you",
-            "motivation", "why should we", "summary", "additional information",
-            "anything else you", "message to", "note to the", "pitch",
-            "tell us about yourself",
+            "why this company", "why should we", "why you", "tell us why",
+            "what interests you", "motivat", "what makes you", "good fit",
+            "why are you a", "why would you", "tell us about yourself",
+            "message to", "note to the", "cover note", "pitch",
+            "anything else you", "additional information",
         )
         if field.field_type == FieldType.TEXTAREA:
             if not any(k in label for k in cover_kw):
@@ -162,7 +170,8 @@ class FieldSolver:
             return None
         try:
             text = self._llm.generate_cover_letter_snippet(
-                job_title, company, job_description, self._build_profile_summary()
+                field.label, job_title, company, job_description,
+                self._build_profile_summary(),
             )
             log.info("solver.cover_letter", label=field.label[:50], chars=len(text or ""))
             return text or None
@@ -553,8 +562,21 @@ class FieldSolver:
 
         experience = profile.get("experience", [])
         if experience:
-            latest = experience[0]
-            parts.append(f"Current role: {latest.get('title', '')} at {latest.get('company', '')}")
+            # Include the two most recent roles with a couple of real impact
+            # bullets each, so cover-letter narratives can cite concrete
+            # achievements instead of generic claims.
+            exp_lines = ["Recent experience (use these real facts; never invent):"]
+            for role in experience[:2]:
+                title = role.get("title", "")
+                company = role.get("company", "")
+                dates = f"{role.get('start_date', '')}–{role.get('end_date', '') or 'present'}"
+                exp_lines.append(f"- {title} at {company} ({dates})")
+                bullets = role.get("bullets", []) or []
+                for b in bullets[:2]:
+                    text = b.get("text", "") if isinstance(b, dict) else str(b)
+                    if text:
+                        exp_lines.append(f"    • {text}")
+            parts.append("\n".join(exp_lines))
 
         # Years-per-technology so "how many years of X?" is answered from real
         # data (and closely-related tech can be reasoned about honestly).
