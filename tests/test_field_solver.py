@@ -263,3 +263,47 @@ class TestNameRouting:
     async def test_reference_name_not_applicant(self, solver):
         answer, _, _ = await solver.solve(_make_field("Reference full name", FieldType.TEXT))
         assert answer not in ("Doe", "Jane", "Jane Doe")
+
+
+class TestAddressRouting:
+    """Street-address fields fill from profile (never LLM-guessed), without
+    catching 'Email address' or URL fields that also contain 'address'."""
+
+    def _solver(self, config, street="16611 48th Ave W"):
+        if street is not None:
+            config.profile["personal"]["street_address"] = street
+        return FieldSolver(config, llm=None)
+
+    @pytest.mark.asyncio
+    async def test_street_address_from_profile(self, config):
+        solver = self._solver(config)
+        answer, source, _ = await solver.solve(_make_field("Street Address", FieldType.TEXT))
+        assert answer == "16611 48th Ave W"
+        assert source == "profile"
+
+    @pytest.mark.asyncio
+    async def test_address_line_1(self, config):
+        solver = self._solver(config)
+        answer, _, _ = await solver.solve(_make_field("Address Line 1", FieldType.TEXT))
+        assert answer == "16611 48th Ave W"
+
+    @pytest.mark.asyncio
+    async def test_email_address_not_treated_as_street(self, config):
+        solver = self._solver(config)
+        answer, _, _ = await solver.solve(_make_field("Email address", FieldType.TEXT))
+        assert answer == "jane@test.com"
+
+    @pytest.mark.asyncio
+    async def test_linkedin_url_not_treated_as_street(self, config):
+        solver = self._solver(config)
+        answer, _, _ = await solver.solve(_make_field("LinkedIn URL", FieldType.TEXT))
+        assert answer == "https://linkedin.com/in/janedoe"
+
+    @pytest.mark.asyncio
+    async def test_no_street_on_file_falls_through(self, config):
+        # Unset street → must not fabricate; with no LLM it falls to skip.
+        config.profile["personal"].pop("street_address", None)
+        solver = FieldSolver(config, llm=None)
+        answer, source, _ = await solver.solve(_make_field("Street Address", FieldType.TEXT))
+        assert answer is None
+        assert source == "skip"

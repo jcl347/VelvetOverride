@@ -276,6 +276,23 @@ class FieldSolver:
         if name is not None:
             return name
 
+        # Street address — from profile so the LLM never invents one. Guard
+        # against "email address", URL/website fields, and "IP address" which
+        # also contain the word "address".
+        is_street = "street" in label or (
+            "address" in label and not any(
+                x in label for x in ("email", "e-mail", "url", "web",
+                                     "linkedin", "github", "ip ")
+            )
+        )
+        if is_street:
+            street = (personal.get("street_address") or personal.get("address")
+                      or personal.get("street") or "")
+            if street:
+                return str(street)
+            # No street on file → fall through (LLM). Encourage adding
+            # personal.street_address to the profile to avoid a guessed value.
+
         # NOTE: name fields are handled ONLY by _name_answer above — do not add
         # "first name"/"last name" here, or a non-applicant field like "provide
         # their first and last name" would naively match and get the surname.

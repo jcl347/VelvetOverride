@@ -20,6 +20,7 @@ personal:
   linkedin_url: "https://www.linkedin.com/in/janedoe"
   website: "https://github.com/janedoe"
   github: "https://github.com/janedoe"
+  street_address: ""               # e.g. "123 Main St" — fills "Street Address" fields
   city: "Seattle"
   state: "Washington"
   country: "United States"
