@@ -346,9 +346,11 @@ class TrackingDB:
                       a.applied_at
                FROM questions q JOIN applications a ON q.application_id = a.id
                WHERE ( q.answer_source = 'cover_letter'
-                       OR q.field_type = 'textarea'
+                       OR (q.field_type = 'textarea' AND q.answer_source != 'config')
                        OR (q.answer_source = 'llm' AND LENGTH(q.answer_given) > 150) )
                  AND TRIM(COALESCE(q.answer_given, '')) != ''
+                 -- exclude LinkedIn's "I'm looking for…" box (not a cover letter)
+                 AND lower(q.question_text) NOT LIKE '%looking for%'
                ORDER BY a.applied_at DESC, q.id DESC
                LIMIT ?""",
             (limit,),

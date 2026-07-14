@@ -48,6 +48,14 @@ class FieldSolver:
         """
         label = field.label.lower().strip()
 
+        # ── Tier 0: Intentionally-skipped fields ──
+        # Optional prompts the user does NOT want auto-answered (e.g. LinkedIn's
+        # "I'm looking for…" preferences box). Left blank instead of getting a
+        # generated paragraph. Extendable via answers.yaml `skip_fields`.
+        if self._should_skip_field(label):
+            log.info("solver.skip_field", label=field.label[:60])
+            return None, "skip", False
+
         # ── Tier 1: Learned answers ──
         # Require a strong match (normalized equality, or one string containing
         # the other AND the shorter being reasonably long) to avoid a short
@@ -211,6 +219,22 @@ class FieldSolver:
             return "Yes" if answer else "No"
 
         return None
+
+    # Optional prompts left blank by default (not required for submission).
+    # Narrow on purpose: only LinkedIn's "I'm looking for…" self-statement box,
+    # NOT genuine questions like "what are you looking for in a role" (which the
+    # cover-letter tier can answer well). Extend via answers.yaml `skip_fields`.
+    _DEFAULT_SKIP_PATTERNS = (
+        "i'm looking for", "i am looking for", "im looking for",
+    )
+
+    def _should_skip_field(self, label: str) -> bool:
+        """True if this field should be left blank rather than auto-answered."""
+        patterns = list(self._DEFAULT_SKIP_PATTERNS)
+        # User-extendable list from answers.yaml (strings, case-insensitive).
+        extra = self._answers.get("skip_fields", []) or []
+        patterns += [str(p).lower() for p in extra if str(p).strip()]
+        return any(p in label for p in patterns)
 
     def _name_answer(self, label: str) -> str | None:
         """Resolve name fields (first/last/full/preferred) from the profile.

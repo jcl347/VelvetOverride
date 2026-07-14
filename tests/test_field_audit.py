@@ -152,15 +152,22 @@ class TestCoverLetters:
 
     def test_captures_long_llm_text(self, db):
         run_id = db.start_run(dry_run=False, max_apps=5)
-        long = "I am looking for a challenging role that leverages my experience " * 3
+        long = "I am excited about this role because it leverages my experience " * 3
         _seed(db, run_id, [
-            QuestionRecord("I'm looking for…", "text", long, "llm"),
+            QuestionRecord("Why do you want this role?", "text", long, "llm"),
             QuestionRecord("Phone", "text", "585-305-3419", "profile"),  # excluded
         ])
         letters = db.get_cover_letters()
         fields = {r["question_text"] for r in letters}
-        assert "I'm looking for…" in fields
+        assert "Why do you want this role?" in fields
         assert "Phone" not in fields
+
+    def test_excludes_looking_for_box(self, db):
+        # LinkedIn's "I'm looking for…" is not a cover letter — must be excluded.
+        run_id = db.start_run(dry_run=False, max_apps=5)
+        long = "I'm looking for a challenging role leveraging my experience " * 3
+        _seed(db, run_id, [QuestionRecord("I'm looking for…", "text", long, "llm")])
+        assert db.get_cover_letters() == []
 
     def test_excludes_empty_answers(self, db):
         run_id = db.start_run(dry_run=False, max_apps=5)

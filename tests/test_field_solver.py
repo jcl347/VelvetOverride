@@ -307,3 +307,33 @@ class TestAddressRouting:
         answer, source, _ = await solver.solve(_make_field("Street Address", FieldType.TEXT))
         assert answer is None
         assert source == "skip"
+
+
+class TestSkipFields:
+    """LinkedIn's 'I'm looking for…' box is left blank, not auto-answered."""
+
+    @pytest.fixture
+    def solver(self, config):
+        return FieldSolver(config, llm=None)
+
+    @pytest.mark.asyncio
+    async def test_im_looking_for_is_skipped(self, solver):
+        for label in ("I'm looking for…", "I am looking for", "Im looking for a role"):
+            answer, source, _ = await solver.solve(_make_field(label, FieldType.TEXT))
+            assert answer is None, label
+            assert source == "skip", label
+
+    @pytest.mark.asyncio
+    async def test_genuine_looking_for_question_not_skipped(self, solver):
+        # "What are you looking for in a role" is a real question — not skipped
+        # (no LLM here, so it resolves via other tiers, but must not be 'skip').
+        assert not solver._should_skip_field("what are you looking for in your next role?")
+
+    @pytest.mark.asyncio
+    async def test_config_extendable_skip(self, config):
+        config.answers["skip_fields"] = ["salary expectations story"]
+        solver = FieldSolver(config, llm=None)
+        answer, source, _ = await solver.solve(
+            _make_field("Salary expectations story", FieldType.TEXTAREA))
+        assert answer is None
+        assert source == "skip"
