@@ -27,6 +27,7 @@ async def run_bot(
     keep_open: bool | None = None,
     keywords: list[str] | None = None,
     locations: list[str] | None = None,
+    experience: list[str] | None = None,
 ) -> None:
     """Main bot orchestration loop."""
     config = load_config(Path(config_dir) if config_dir else None)
@@ -34,9 +35,9 @@ async def run_bot(
     if dry_run is not None:
         config.settings.setdefault("bot", {})["dry_run"] = dry_run
 
-    # Search overrides: CLI target roles / locations take precedence over
-    # settings.yaml so runs can be pointed at any jobs/locations on the fly.
-    _apply_search_overrides(config, keywords, locations)
+    # Search overrides: CLI target roles / locations / experience take
+    # precedence over settings.yaml so runs can be pointed on the fly.
+    _apply_search_overrides(config, keywords, locations, experience)
 
     # SAFETY GUARD: never apply with the committed placeholder identity.
     # (config/profile.yaml is a template; your real data belongs in
@@ -569,12 +570,26 @@ def _placeholder_profile_reason(config) -> str:
     return ""
 
 
-def _apply_search_overrides(config, keywords, locations) -> None:
-    """Override settings.yaml search roles/locations with CLI values, if given."""
+_VALID_EXPERIENCE_LEVELS = (
+    "internship", "entry_level", "associate", "mid_senior", "director", "executive",
+)
+
+
+def _apply_search_overrides(config, keywords, locations, experience=None) -> None:
+    """Override settings.yaml search roles/locations/experience with CLI values."""
     if keywords:
         config.settings.setdefault("search", {})["keywords"] = list(keywords)
     if locations:
         config.settings.setdefault("search", {})["locations"] = list(locations)
+    if experience:
+        levels = [e.strip().lower() for e in experience if e.strip()]
+        unknown = [e for e in levels if e not in _VALID_EXPERIENCE_LEVELS]
+        if unknown:
+            log.warning("bot.unknown_experience_levels", unknown=unknown,
+                        valid=list(_VALID_EXPERIENCE_LEVELS))
+        valid = [e for e in levels if e in _VALID_EXPERIENCE_LEVELS]
+        if valid:
+            config.settings.setdefault("search", {})["experience_levels"] = valid
 
 
 def audit_field_routing(db, run_id: int) -> list[dict]:
@@ -832,35 +847,40 @@ def cli(ctx, config_dir, verbose, json_log):
               help="Target role to search (repeatable). Overrides settings.yaml search.keywords.")
 @click.option("--location", "-l", "locations", multiple=True,
               help="Location to search (repeatable). Overrides settings.yaml search.locations.")
+@click.option("--experience", "-x", "experience", multiple=True,
+              help="Experience level to target (repeatable): internship, entry_level, "
+                   "associate (mid), mid_senior, director, executive. "
+                   "Overrides settings.yaml search.experience_levels.")
 @click.option("--keep-open/--no-keep-open", default=None, help="Leave the browser open after the run")
 @click.option("--loop", is_flag=True, help="Keep re-running passes until stopped (Ctrl-C)")
 @click.option("--loop-delay", type=int, default=300, help="Seconds to wait between loop passes")
 @click.option("--max-loops", type=int, default=0, help="Stop after N passes (0 = unlimited)")
 @click.pass_context
 def run(ctx, dry_run, max_apps, min_salary, max_salary, keywords, locations,
-        keep_open, loop, loop_delay, max_loops):
+        experience, keep_open, loop, loop_delay, max_loops):
     """Run the full application bot pipeline (optionally on a continuous loop).
 
-    Target roles and locations come from config/settings.yaml, but can be
-    overridden here, e.g.:
+    Target roles, locations, and experience levels come from
+    config/settings.yaml, but can be overridden here, e.g.:
 
-        velvetoverride run --live -k "AI Engineer" -k "ML Engineer" -l "Remote"
+        velvetoverride run --live -k "Software Engineer" -x associate -x mid_senior
     """
     kw = list(keywords) or None
     loc = list(locations) or None
+    exp = list(experience) or None
     if loop:
         # keep_open would block forever, so force it off between passes
         asyncio.run(
             _run_loop(
                 ctx.obj["config_dir"], dry_run, max_apps, min_salary, max_salary,
                 loop_delay=loop_delay, max_loops=max_loops,
-                keywords=kw, locations=loc,
+                keywords=kw, locations=loc, experience=exp,
             )
         )
     else:
         asyncio.run(run_bot(
             ctx.obj["config_dir"], dry_run, max_apps, min_salary, max_salary,
-            keep_open, keywords=kw, locations=loc,
+            keep_open, keywords=kw, locations=loc, experience=exp,
         ))
 
 
@@ -868,6 +888,7 @@ async def _run_loop(
     config_dir, dry_run, max_apps, min_salary, max_salary,
     loop_delay: int = 300, max_loops: int = 0,
     keywords: list[str] | None = None, locations: list[str] | None = None,
+    experience: list[str] | None = None,
 ) -> None:
     """Re-run the pipeline continuously.
 
@@ -883,6 +904,7 @@ async def _run_loop(
             await run_bot(
                 config_dir, dry_run, max_apps, min_salary, max_salary,
                 keep_open=False, keywords=keywords, locations=locations,
+                experience=experience,
             )
         except KeyboardInterrupt:
             log.info("loop.interrupted", pass_num=pass_num)

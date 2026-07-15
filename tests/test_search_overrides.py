@@ -56,3 +56,38 @@ def test_override_on_config_without_search_section():
     _apply_search_overrides(c, ["AI Engineer"], ["Remote"])
     assert c.search["keywords"] == ["AI Engineer"]
     assert c.search["locations"] == ["Remote"]
+
+
+# ── experience-level override (-x/--experience) ──
+
+def test_experience_override_sets_levels():
+    c = _cfg()
+    _apply_search_overrides(c, None, None, ["associate", "mid_senior"])
+    assert c.search["experience_levels"] == ["associate", "mid_senior"]
+    assert c.search["keywords"] == ["Data Scientist"]  # untouched
+
+
+def test_experience_override_normalizes_case():
+    c = _cfg()
+    _apply_search_overrides(c, None, None, ["Associate", " MID_SENIOR "])
+    assert c.search["experience_levels"] == ["associate", "mid_senior"]
+
+
+def test_experience_override_drops_invalid_keeps_valid():
+    c = _cfg()
+    _apply_search_overrides(c, None, None, ["associate", "bogus_level"])
+    assert c.search["experience_levels"] == ["associate"]
+
+
+def test_experience_all_invalid_leaves_config_alone():
+    c = Config(settings={"search": {"experience_levels": ["director"]}})
+    _apply_search_overrides(c, None, None, ["nope"])
+    assert c.search["experience_levels"] == ["director"]  # unchanged
+
+
+def test_experience_override_builds_correct_fE():
+    from velvetoverride.linkedin.search import build_search_url
+    c = _cfg()
+    _apply_search_overrides(c, ["Software Engineer"], None, ["associate", "mid_senior"])
+    url = build_search_url(c, keyword="Software Engineer")
+    assert "f_E=3%2C4" in url or "f_E=3,4" in url
