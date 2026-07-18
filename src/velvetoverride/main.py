@@ -28,6 +28,7 @@ async def run_bot(
     keywords: list[str] | None = None,
     locations: list[str] | None = None,
     experience: list[str] | None = None,
+    date_posted: str | None = None,
 ) -> None:
     """Main bot orchestration loop."""
     config = load_config(Path(config_dir) if config_dir else None)
@@ -35,9 +36,9 @@ async def run_bot(
     if dry_run is not None:
         config.settings.setdefault("bot", {})["dry_run"] = dry_run
 
-    # Search overrides: CLI target roles / locations / experience take
+    # Search overrides: CLI target roles / locations / experience / date take
     # precedence over settings.yaml so runs can be pointed on the fly.
-    _apply_search_overrides(config, keywords, locations, experience)
+    _apply_search_overrides(config, keywords, locations, experience, date_posted)
 
     # SAFETY GUARD: never apply with the committed placeholder identity.
     # (config/profile.yaml is a template; your real data belongs in
@@ -575,12 +576,21 @@ _VALID_EXPERIENCE_LEVELS = (
 )
 
 
-def _apply_search_overrides(config, keywords, locations, experience=None) -> None:
-    """Override settings.yaml search roles/locations/experience with CLI values."""
+def _apply_search_overrides(config, keywords, locations, experience=None,
+                            date_posted=None) -> None:
+    """Override settings.yaml search roles/locations/experience/date with CLI values."""
     if keywords:
         config.settings.setdefault("search", {})["keywords"] = list(keywords)
     if locations:
         config.settings.setdefault("search", {})["locations"] = list(locations)
+    if date_posted:
+        from velvetoverride.linkedin.search import date_posted_param
+        key = str(date_posted).strip().lower()
+        if date_posted_param(key):
+            config.settings.setdefault("search", {})["date_posted"] = key
+        else:
+            log.warning("bot.unknown_date_posted", value=date_posted,
+                        hint="use any|past_month|past_week|past_3_days|past_24h or past_<N>_days")
     if experience:
         levels = [e.strip().lower() for e in experience if e.strip()]
         unknown = [e for e in levels if e not in _VALID_EXPERIENCE_LEVELS]
@@ -851,13 +861,17 @@ def cli(ctx, config_dir, verbose, json_log):
               help="Experience level to target (repeatable): internship, entry_level, "
                    "associate (mid), mid_senior, director, executive. "
                    "Overrides settings.yaml search.experience_levels.")
+@click.option("--posted", "-d", "date_posted", default=None,
+              help="How recent postings must be: any, past_month, past_week, "
+                   "past_3_days, past_24h, or past_<N>_days (e.g. past_3_days). "
+                   "Overrides settings.yaml search.date_posted.")
 @click.option("--keep-open/--no-keep-open", default=None, help="Leave the browser open after the run")
 @click.option("--loop", is_flag=True, help="Keep re-running passes until stopped (Ctrl-C)")
 @click.option("--loop-delay", type=int, default=300, help="Seconds to wait between loop passes")
 @click.option("--max-loops", type=int, default=0, help="Stop after N passes (0 = unlimited)")
 @click.pass_context
 def run(ctx, dry_run, max_apps, min_salary, max_salary, keywords, locations,
-        experience, keep_open, loop, loop_delay, max_loops):
+        experience, date_posted, keep_open, loop, loop_delay, max_loops):
     """Run the full application bot pipeline (optionally on a continuous loop).
 
     Target roles, locations, and experience levels come from
@@ -874,13 +888,14 @@ def run(ctx, dry_run, max_apps, min_salary, max_salary, keywords, locations,
             _run_loop(
                 ctx.obj["config_dir"], dry_run, max_apps, min_salary, max_salary,
                 loop_delay=loop_delay, max_loops=max_loops,
-                keywords=kw, locations=loc, experience=exp,
+                keywords=kw, locations=loc, experience=exp, date_posted=date_posted,
             )
         )
     else:
         asyncio.run(run_bot(
             ctx.obj["config_dir"], dry_run, max_apps, min_salary, max_salary,
             keep_open, keywords=kw, locations=loc, experience=exp,
+            date_posted=date_posted,
         ))
 
 
@@ -888,7 +903,7 @@ async def _run_loop(
     config_dir, dry_run, max_apps, min_salary, max_salary,
     loop_delay: int = 300, max_loops: int = 0,
     keywords: list[str] | None = None, locations: list[str] | None = None,
-    experience: list[str] | None = None,
+    experience: list[str] | None = None, date_posted: str | None = None,
 ) -> None:
     """Re-run the pipeline continuously.
 
@@ -904,7 +919,7 @@ async def _run_loop(
             await run_bot(
                 config_dir, dry_run, max_apps, min_salary, max_salary,
                 keep_open=False, keywords=keywords, locations=locations,
-                experience=experience,
+                experience=experience, date_posted=date_posted,
             )
         except KeyboardInterrupt:
             log.info("loop.interrupted", pass_num=pass_num)

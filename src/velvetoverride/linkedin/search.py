@@ -55,8 +55,29 @@ DATE_POSTED_MAP = {
     "any": "",
     "past_month": "r2592000",
     "past_week": "r604800",
+    "past_3_days": "r259200",
     "past_24h": "r86400",
 }
+
+
+def date_posted_param(date_posted: str) -> str:
+    """LinkedIn f_TPR value for a date-posted setting.
+
+    Accepts the named presets above plus a flexible ``past_<N>_days`` /
+    ``past_<N>d`` form (e.g. "past_3_days", "past_5d") so any window can be
+    targeted without adding a preset. Returns "" when unset/unrecognized.
+    """
+    key = (date_posted or "").strip().lower()
+    if not key:
+        return ""
+    if key in DATE_POSTED_MAP:
+        return DATE_POSTED_MAP[key]
+    m = re.fullmatch(r"past_(\d+)_?d(?:ays?)?", key)
+    if m:
+        days = int(m.group(1))
+        if days > 0:
+            return f"r{days * 86400}"
+    return ""
 
 REMOTE_MAP = {
     "on_site": "1",
@@ -108,10 +129,10 @@ def build_search_url(config: Config, keyword: str | None = None,
         if codes:
             params["f_E"] = ",".join(codes)
 
-    # Date posted
-    date_posted = search.get("date_posted", "")
-    if date_posted and date_posted in DATE_POSTED_MAP and DATE_POSTED_MAP[date_posted]:
-        params["f_TPR"] = DATE_POSTED_MAP[date_posted]
+    # Date posted (named preset or flexible past_<N>_days)
+    tpr = date_posted_param(search.get("date_posted", ""))
+    if tpr:
+        params["f_TPR"] = tpr
 
     # Remote
     remotes = search.get("remote", [])

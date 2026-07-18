@@ -91,3 +91,44 @@ def test_experience_override_builds_correct_fE():
     _apply_search_overrides(c, ["Software Engineer"], None, ["associate", "mid_senior"])
     url = build_search_url(c, keyword="Software Engineer")
     assert "f_E=3%2C4" in url or "f_E=3,4" in url
+
+
+# ── date-posted override (-d/--posted), incl. flexible past_<N>_days ──
+
+def test_date_posted_param_presets():
+    from velvetoverride.linkedin.search import date_posted_param
+    assert date_posted_param("past_24h") == "r86400"
+    assert date_posted_param("past_3_days") == "r259200"   # 3 * 86400
+    assert date_posted_param("past_week") == "r604800"
+    assert date_posted_param("past_month") == "r2592000"
+    assert date_posted_param("any") == ""
+    assert date_posted_param("") == ""
+
+
+def test_date_posted_param_flexible_days():
+    from velvetoverride.linkedin.search import date_posted_param
+    assert date_posted_param("past_5_days") == "r432000"
+    assert date_posted_param("past_2d") == "r172800"
+    assert date_posted_param("past_10_day") == "r864000"
+    assert date_posted_param("past_0_days") == ""   # nonsensical -> unset
+    assert date_posted_param("garbage") == ""
+
+
+def test_date_posted_override_sets_config():
+    c = _cfg()
+    _apply_search_overrides(c, None, None, None, "past_3_days")
+    assert c.search["date_posted"] == "past_3_days"
+
+
+def test_invalid_date_posted_leaves_config_alone():
+    c = Config(settings={"search": {"date_posted": "past_week"}})
+    _apply_search_overrides(c, None, None, None, "nonsense")
+    assert c.search["date_posted"] == "past_week"
+
+
+def test_date_posted_override_builds_correct_fTPR():
+    from velvetoverride.linkedin.search import build_search_url
+    c = _cfg()
+    _apply_search_overrides(c, ["Software Engineer"], None, None, "past_3_days")
+    url = build_search_url(c, keyword="Software Engineer")
+    assert "f_TPR=r259200" in url
