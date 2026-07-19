@@ -136,6 +136,23 @@ class ApplicationFlow:
                 # Detect and fill all fields on this step — scoped to the Easy
                 # Apply modal so we don't touch page chrome ("Set alert" etc.)
                 modal = await self._easy_apply_modal()
+                if modal is None:
+                    # SAFETY: detect_form_fields treats scope=None as "scan the
+                    # whole page". On LinkedIn that means the bot would start
+                    # clicking the user's OWN account UI — the messaging drawer's
+                    # conversation checkboxes, etc. Never do that: abort instead.
+                    if await self._submission_confirmed():
+                        log.info("apply.submitted", company=listing.company, title=listing.title)
+                        return self._make_record(listing, ApplicationStatus.APPLIED)
+                    log.error("apply.modal_missing", step=step + 1, company=listing.company,
+                              title=listing.title,
+                              msg="Easy Apply modal not found — aborting rather than scanning the page")
+                    await self._dismiss_modal()
+                    return self._make_record(
+                        listing, ApplicationStatus.FAILED,
+                        f"Easy Apply modal not found at step {step + 1} — aborted "
+                        "(refused to scan the full page)",
+                    )
                 fields = await detect_form_fields(self._page, scope=modal)
                 await self._fill_fields(fields, listing)
                 await random_delay(0.8, 1.8)
@@ -739,6 +756,14 @@ class ApplicationFlow:
                         answer_source="skip",
                         needs_review=True,
                     ))
+                continue
+
+            # SAFETY: a control with no label is not a real application question.
+            # Answering it blindly (the LLM returns "Yes" for an empty prompt) and
+            # clicking it can toggle unrelated UI. Skip it.
+            if not (field.label or "").strip():
+                log.warning("apply.unlabeled_field_skipped",
+                            field_type=field.field_type.value)
                 continue
 
             # Skip if already has a value (pre-filled)
