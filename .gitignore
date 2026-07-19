@@ -6,6 +6,12 @@ config/.env
 # The committed profile.yaml / answers.yaml are safe placeholders.
 config/*.local.yaml
 
+# Your own resume dropped in the repo root (contains name/phone/email/history).
+# Referenced via resume.static_resume_path; never commit it.
+/*.pdf
+/*.docx
+/*.doc
+
 # Generated data (DB, tailored resumes, exports, logs — all runtime artifacts)
 data/
 data/applications.db
