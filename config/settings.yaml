@@ -72,9 +72,9 @@ search:
     - "mid_senior"
     - "director"
   # Date posted: any, past_month, past_week, past_24h
-  # past_week gives a much larger pool so higher max_applications can fill;
-  # 24h = only same-day-fresh postings (fast, but pool drains after a run).
-  date_posted: "past_week"
+  # past_month = largest pool (refills Easy Apply supply once the week's is
+  # drained); past_week is a smaller/fresher pool; 24h = same-day only.
+  date_posted: "past_month"
   # Remote filter: on_site, remote, hybrid.
   # "Remote or in Seattle" — location above is Seattle, so on_site/hybrid are
   # Seattle-based; remote adds work-from-anywhere roles.
@@ -91,13 +91,16 @@ search:
   # drop seniorities you don't want while still searching all experience levels.
   blacklist_title_keywords:
     - "principal"
-  # Companies to skip
+  # Companies to skip. Substring match (case-insensitive), so "TikTok" also
+  # blocks "TikTok USDS Joint Venture".
   blacklist_companies:
     - "Revature"
+    - "TikTok"
+    - "Jobgether"
   # Minimum job match score (0-100) to proceed with application. Scoring is
-  # crude keyword-overlap, so real jobs score low (~10-35); keep this low and
-  # rely on the ChatGPT experience-fit check (fit: block) as the quality gate.
-  min_match_score: 12
+  # crude keyword-overlap, so real jobs score ~10-80. Raised from 12 to filter
+  # weak keyword matches; the ChatGPT fit floor (fit.min_score) is the second gate.
+  min_match_score: 25
 
 # ─── Experience Fit (ChatGPT) ─────────────────────────────────
 # Before applying, ChatGPT compares the job's seniority + hard requirements
@@ -105,14 +108,13 @@ search:
 # lead?" check. The verdict is recorded on every application and shown on the
 # dashboard.
 #
-# By default nothing is skipped (min_score: 0, skip_recommendations: []) so you
-# can review its judgement first. To act on it:
-#   min_score: 40                     -> skip anything scoring below 40
-#   skip_recommendations: ["skip"]    -> skip roles it deems a clear mismatch
+# Quality floor is ACTIVE: anything ChatGPT scores below min_score, or that it
+# judges a clear mismatch, is skipped rather than applied to.
+#   min_score: 0 + skip_recommendations: []  -> apply to everything (review mode)
 fit:
   enabled: true
-  min_score: 0
-  skip_recommendations: []
+  min_score: 50
+  skip_recommendations: ["skip"]
 
 # ─── Salary Filtering ─────────────────────────────────────────
 # Filter jobs by extracted salary range. Jobs without salary info

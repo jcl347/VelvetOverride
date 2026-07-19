@@ -320,9 +320,13 @@ async def _scrape_one_search(
                     continue
 
                 # Company blacklist (JD-keyword blacklist is applied later, once
-                # the full description has been fetched)
-                if listing.company.lower() in blacklist_companies:
-                    log.debug("search.blacklisted_company", company=listing.company)
+                # the full description has been fetched). Substring match so one
+                # entry ("TikTok") also blocks its variants ("TikTok USDS Joint
+                # Venture"), which an exact match would let through.
+                company_l = listing.company.lower()
+                blocked = next((b for b in blacklist_companies if b and b in company_l), None)
+                if blocked:
+                    log.info("search.blacklisted_company", company=listing.company, matched=blocked)
                     continue
 
                 all_listings.append(listing)
