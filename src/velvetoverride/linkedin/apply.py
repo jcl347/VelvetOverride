@@ -113,12 +113,43 @@ class ApplicationFlow:
                 log.warning("apply.no_easy_apply_button", url=listing.url)
                 return self._make_record(listing, ApplicationStatus.SKIPPED, "No Easy Apply button found")
 
-            try:
-                await easy_apply_btn.first.scroll_into_view_if_needed(timeout=4000)
-            except Exception:
-                pass
-            await easy_apply_btn.first.click()
-            await random_delay(2.0, 4.0)
+            # Prefer the specific apply button by its accessible name so we never
+            # click an unrelated "Easy Apply" chip. LinkedIn now uses obfuscated
+            # CSS classes, so match on aria-label/role, not class.
+            apply_btn = self._page.locator(
+                'button[aria-label*="Easy Apply" i], button.jobs-apply-button'
+            )
+            if await apply_btn.count() == 0:
+                apply_btn = easy_apply_btn
+
+            # Clicking once often no-ops: the page fires domcontentloaded before
+            # React attaches the button handler (hydration race). Retry the click
+            # and WAIT for the modal each time until it actually opens.
+            modal_selector = (
+                'div[data-test-modal-id="easy-apply-modal"], '
+                '.jobs-easy-apply-modal, '
+                'div.artdeco-modal[role="dialog"], '
+                'div[role="dialog"]'
+            )
+            modal_opened = False
+            for attempt in range(4):
+                try:
+                    await apply_btn.first.scroll_into_view_if_needed(timeout=3000)
+                    await apply_btn.first.click(timeout=5000)
+                except Exception as e:
+                    log.warning("apply.easy_apply_click_failed",
+                                attempt=attempt + 1, error=str(e)[:80])
+                try:
+                    await self._page.wait_for_selector(
+                        modal_selector, state="visible", timeout=4000)
+                    modal_opened = True
+                    break
+                except Exception:
+                    await random_delay(1.0, 2.0)
+            if not modal_opened:
+                log.warning("apply.modal_wait_timeout", company=listing.company,
+                            title=listing.title, attempts=4)
+            await random_delay(1.0, 2.0)
 
             # Walk through multi-step form
             max_steps = int(self._config.bot.get("max_form_steps", 20))
@@ -144,8 +175,9 @@ class ApplicationFlow:
                     if await self._submission_confirmed():
                         log.info("apply.submitted", company=listing.company, title=listing.title)
                         return self._make_record(listing, ApplicationStatus.APPLIED)
+                    diag = await self._dialog_diagnostics()
                     log.error("apply.modal_missing", step=step + 1, company=listing.company,
-                              title=listing.title,
+                              title=listing.title, dialogs=diag,
                               msg="Easy Apply modal not found — aborting rather than scanning the page")
                     await self._dismiss_modal()
                     return self._make_record(
@@ -266,18 +298,79 @@ class ApplicationFlow:
             return self._make_record(listing, ApplicationStatus.FAILED, str(e))
 
     async def _easy_apply_modal(self):
-        """Return a locator for the Easy Apply modal container, or None."""
-        modal = self._page.locator(
-            'div[data-test-modal-id="easy-apply-modal"], '
-            '.jobs-easy-apply-modal, '
-            'div[role="dialog"].artdeco-modal'
+        """Return a locator for the Easy Apply modal container, or None.
+
+        Tries specific selectors first, then a role=dialog that actually looks
+        like the application form (contains form controls or Next/Submit/Review),
+        so a change to LinkedIn's specific data-test id doesn't blind us — while
+        still avoiding unrelated dialogs.
+        """
+        specific = (
+            'div[data-test-modal-id="easy-apply-modal"]',
+            '.jobs-easy-apply-modal',
+            'div.jobs-easy-apply-modal',
+            'div[role="dialog"][aria-label*="Easy Apply" i]',
+            'div[role="dialog"].artdeco-modal',
         )
+        for sel in specific:
+            try:
+                loc = self._page.locator(sel)
+                if await loc.count() > 0:
+                    return loc.first
+            except Exception:
+                pass
+        # Fallback: a visible dialog that contains an application form. Scoped to
+        # form-bearing dialogs so we never grab e.g. a cookie/notification dialog.
         try:
-            if await modal.count() > 0:
-                return modal.first
+            dlg = self._page.locator(
+                'div[role="dialog"]:has(input), '
+                'div[role="dialog"]:has(select), '
+                'div[role="dialog"]:has(button:has-text("Submit application")), '
+                'div[role="dialog"]:has(button:has-text("Review")), '
+                'div[role="dialog"]:has(button[aria-label*="next" i])'
+            )
+            if await dlg.count() > 0:
+                return dlg.first
         except Exception:
             pass
         return None
+
+    async def _dialog_diagnostics(self) -> str:
+        """Summarize the apply UI on the page — dialogs AND apply buttons plus the
+        current URL — to diagnose why the Easy Apply modal wasn't reached
+        (markup change vs. wrong/non-easy-apply button vs. navigation)."""
+        try:
+            info = await self._page.evaluate(
+                "() => {"
+                " const q = s => Array.from(document.querySelectorAll(s));"
+                " const dialogs = q('[role=\"dialog\"], .artdeco-modal, [data-test-modal-id]')"
+                "   .slice(0,5).map(n => ({modalId:n.getAttribute('data-test-modal-id'),"
+                "     aria:n.getAttribute('aria-label'), cls:(n.className||'').toString().slice(0,60)}));"
+                " const btns = q('button').filter(b => /apply/i.test((b.innerText||'')+"
+                "   (b.getAttribute('aria-label')||''))).slice(0,6).map(b => ({"
+                "     txt:(b.innerText||'').trim().slice(0,30),"
+                "     aria:(b.getAttribute('aria-label')||'').slice(0,40),"
+                "     cls:(b.className||'').toString().slice(0,50),"
+                "     vis:!!(b.offsetWidth||b.offsetHeight)}));"
+                " return {url:location.href.slice(0,90), dialogs, applyButtons:btns,"
+                "   pages:window.length};"
+                "}"
+            )
+            # Is the modal hiding in a child frame?
+            frames = []
+            for f in self._page.frames:
+                try:
+                    cnt = await f.locator('[role="dialog"], .artdeco-modal, [data-test-modal-id]').count()
+                    if cnt > 0:
+                        frames.append({"url": (f.url or "")[:60], "dialogs": cnt})
+                except Exception:
+                    pass
+            info["framesWithDialog"] = frames
+            info["frameCount"] = len(self._page.frames)
+            import json as _json
+            return _json.dumps(info)[:1100]
+        except Exception as e:
+            return f"diag-failed: {str(e)[:80]}"
 
     async def _fix_validation_errors(self, fields, listing, modal) -> list[str]:
         """Read inline (red) validation errors and try to correct the field.
