@@ -427,33 +427,33 @@ class ApplicationFlow:
         }
 
     async def _submission_confirmed(self) -> bool:
-        """Detect that an Easy Apply submission actually completed.
+        """Detect that an Easy Apply submission ACTUALLY completed.
 
-        LinkedIn shows a "Your application was sent" / "Application submitted"
-        post-apply modal, and the Submit/Review buttons disappear. Returns True
-        if we see a confirmation OR the apply form is gone.
+        Requires a POSITIVE confirmation signal — LinkedIn's post-apply modal
+        ("Your application was sent to …"). Two things this must NOT do, because
+        they caused jobs to be recorded as applied without submitting:
+          - Match the bare word "applied": it appears all over a jobs page
+            ("28 applicants", "Applied 2h ago"), so it is never proof.
+          - Treat the form's ABSENCE as success: the modal may simply have failed
+            to open, or the page navigated — neither means we submitted.
+        A false negative here just makes the job retryable; a false positive
+        fabricates an application, so we err toward requiring explicit proof.
         """
-        try:
-            body = (await self._page.locator("body").inner_text(timeout=3000) or "").lower()
-        except Exception:
-            body = ""
-        markers = (
-            "application sent", "your application was sent", "application submitted",
-            "applied", "your application has been submitted", "premium",
+        confirm_phrases = (
+            "your application was sent",
+            "application was sent to",
+            "your application has been sent",
+            "your application has been submitted",
+            "application submitted successfully",
         )
-        # "premium" alone is too weak; require a real confirmation phrase
-        confirm_phrases = [m for m in markers if m != "premium"]
-        if any(m in body for m in confirm_phrases):
-            return True
-        # Or: the Easy Apply modal / submit button is gone (form closed on submit)
+        # Prefer a post-apply dialog if one is present; else the whole body.
         try:
-            modal = self._page.locator('div[data-test-modal-id="easy-apply-modal"]')
-            submit = self._page.locator(SUBMIT_SELECTOR)
-            if await modal.count() == 0 and await submit.count() == 0:
-                return True
+            dialog = self._page.locator('div[role="dialog"], .artdeco-modal')
+            scope = dialog.first if await dialog.count() > 0 else self._page.locator("body")
+            text = (await scope.inner_text(timeout=3000) or "").lower()
         except Exception:
-            pass
-        return False
+            text = ""
+        return any(p in text for p in confirm_phrases)
 
     async def _is_easy_apply(self) -> bool:
         """True if the current job uses in-app Easy Apply (not an external site)."""
