@@ -126,6 +126,8 @@ class ApplicationFlow:
             # React attaches the button handler (hydration race). Retry the click
             # and WAIT for the modal each time until it actually opens.
             modal_selector = (
+                'dialog:has(header#dialog-header), '
+                'dialog[open], dialog, '
                 'div[data-test-modal-id="easy-apply-modal"], '
                 '.jobs-easy-apply-modal, '
                 'div.artdeco-modal[role="dialog"], '
@@ -176,6 +178,12 @@ class ApplicationFlow:
                         log.info("apply.submitted", company=listing.company, title=listing.title)
                         return self._make_record(listing, ApplicationStatus.APPLIED)
                     diag = await self._dialog_diagnostics()
+                    try:
+                        shot = str(Path("data") / "modal_missing_debug.png")
+                        await self._page.screenshot(path=shot, full_page=False)
+                        log.error("apply.modal_missing_screenshot", path=shot)
+                    except Exception:
+                        pass
                     log.error("apply.modal_missing", step=step + 1, company=listing.company,
                               title=listing.title, dialogs=diag,
                               msg="Easy Apply modal not found — aborting rather than scanning the page")
@@ -300,15 +308,18 @@ class ApplicationFlow:
     async def _easy_apply_modal(self):
         """Return a locator for the Easy Apply modal container, or None.
 
-        Tries specific selectors first, then a role=dialog that actually looks
-        like the application form (contains form controls or Next/Submit/Review),
-        so a change to LinkedIn's specific data-test id doesn't blind us — while
-        still avoiding unrelated dialogs.
+        LinkedIn now renders Easy Apply as a native <dialog> with a
+        <header id="dialog-header"> (obfuscated CSS classes, no role="dialog"
+        and no data-test-modal-id). Match that first, then the legacy markup,
+        then any dialog that actually contains an application form — so a future
+        markup change doesn't blind us, while unrelated dialogs are skipped.
         """
         specific = (
+            'dialog:has(header#dialog-header)',
+            'dialog:has-text("Apply to")',
+            'dialog[open]',
             'div[data-test-modal-id="easy-apply-modal"]',
             '.jobs-easy-apply-modal',
-            'div.jobs-easy-apply-modal',
             'div[role="dialog"][aria-label*="Easy Apply" i]',
             'div[role="dialog"].artdeco-modal',
         )
@@ -323,6 +334,7 @@ class ApplicationFlow:
         # form-bearing dialogs so we never grab e.g. a cookie/notification dialog.
         try:
             dlg = self._page.locator(
+                'dialog:has(input), dialog:has(select), '
                 'div[role="dialog"]:has(input), '
                 'div[role="dialog"]:has(select), '
                 'div[role="dialog"]:has(button:has-text("Submit application")), '
@@ -367,8 +379,31 @@ class ApplicationFlow:
                     pass
             info["framesWithDialog"] = frames
             info["frameCount"] = len(self._page.frames)
+            # If the modal is visually open (obfuscated markup), find it by its
+            # "Apply to …" heading and report the ancestor chain's identifying
+            # attributes so we can build a correct selector.
+            try:
+                chain = await self._page.evaluate(
+                    "() => {"
+                    " const h = Array.from(document.querySelectorAll('h1,h2,h3,[role=heading]'))"
+                    "   .find(e => /^apply to /i.test((e.innerText||'').trim()));"
+                    " if (!h) return null;"
+                    " let el = h; const out = [];"
+                    " for (let i=0;i<9 && el;i++){"
+                    "   out.push({tag:el.tagName, id:el.id||null, role:el.getAttribute('role'),"
+                    "     aria:el.getAttribute('aria-label'),"
+                    "     data:Array.from(el.attributes||[]).filter(a=>a.name.startsWith('data-'))"
+                    "       .map(a=>a.name).slice(0,5),"
+                    "     cls:(el.className||'').toString().slice(0,50)});"
+                    "   el = el.parentElement;"
+                    " } return out;"
+                    "}"
+                )
+                info["applyToChain"] = chain
+            except Exception:
+                pass
             import json as _json
-            return _json.dumps(info)[:1100]
+            return _json.dumps(info)[:1600]
         except Exception as e:
             return f"diag-failed: {str(e)[:80]}"
 
@@ -541,7 +576,7 @@ class ApplicationFlow:
         )
         # Prefer a post-apply dialog if one is present; else the whole body.
         try:
-            dialog = self._page.locator('div[role="dialog"], .artdeco-modal')
+            dialog = self._page.locator('dialog, div[role="dialog"], .artdeco-modal')
             scope = dialog.first if await dialog.count() > 0 else self._page.locator("body")
             text = (await scope.inner_text(timeout=3000) or "").lower()
         except Exception:
