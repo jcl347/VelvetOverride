@@ -210,6 +210,69 @@ def create_app(db_path: str = "data/applications.db", resume_dir: str | Path | N
         finally:
             db.close()
 
+    @app.route("/api/resumes")
+    def api_resumes() -> Any:
+        # The resumes the bot uses: the active setting, every generated PDF on
+        # disk, and which resume each application actually used.
+        from datetime import datetime, timezone
+        resume_root = app.config["RESUME_DIR"]
+        mode, static_name = "tailored", ""
+        try:
+            from velvetoverride.utils.config import load_config
+            c = load_config()
+            mode = c.resume_config.get("mode", "tailored")
+            sp = c.resume_config.get("static_resume_path", "")
+            if sp:
+                static_name = Path(sp).name
+        except Exception:
+            pass
+        files = []
+        if resume_root.exists():
+            for p in sorted(resume_root.glob("*.pdf"),
+                            key=lambda x: x.stat().st_mtime, reverse=True)[:300]:
+                st = p.stat()
+                files.append({
+                    "name": p.name,
+                    "size_kb": round(st.st_size / 1024, 1),
+                    "modified": datetime.fromtimestamp(st.st_mtime, timezone.utc)
+                    .isoformat(),
+                })
+        db = _db(app.config["DB_PATH"])
+        try:
+            used = []
+            for a in db.get_applications(limit=500):
+                if a.resume_version:
+                    used.append({
+                        "company": a.company, "job_title": a.job_title,
+                        "resume": Path(a.resume_version).name,
+                        "applied_at": a.applied_at,
+                    })
+        finally:
+            db.close()
+        return jsonify({"mode": mode, "static_name": static_name,
+                        "static_available": bool(static_name),
+                        "files": files, "used": used})
+
+    @app.route("/resume-static")
+    def resume_static_file():
+        # Serve the configured static resume (it lives outside data/resumes/,
+        # e.g. the repo root). Only ever the exact configured path — no user
+        # input, so no traversal risk.
+        try:
+            from velvetoverride.utils.config import load_config
+            sp = load_config().resume_config.get("static_resume_path", "")
+        except Exception:
+            sp = ""
+        if not sp:
+            abort(404)
+        p = Path(sp)
+        if not p.is_absolute():
+            p = Path.cwd() / p
+        p = p.resolve()
+        if not p.exists() or p.suffix.lower() not in (".pdf", ".doc", ".docx"):
+            abort(404)
+        return send_file(str(p))
+
     @app.route("/resume/<path:name>")
     def resume_file(name: str):
         # Serve a generated resume PDF for review. Path-traversal safe: resolve
@@ -346,6 +409,7 @@ _PAGE = r"""
     <div class="tab" data-tab="fit" onclick="showTab('fit')">Experience fit</div>
     <div class="tab" data-tab="feedback" onclick="showTab('feedback')">Field feedback</div>
     <div class="tab" data-tab="letters" onclick="showTab('letters')">Cover letters</div>
+    <div class="tab" data-tab="resumes" onclick="showTab('resumes')">Resumes</div>
     <div class="tab" data-tab="config" onclick="showTab('config')">Config &amp; search</div>
     <div class="tab" data-tab="runs" onclick="showTab('runs')">Runs</div>
     <div class="tab" data-tab="errors" onclick="showTab('errors')">Errors</div>
@@ -354,6 +418,7 @@ _PAGE = r"""
   <div id="fit" class="hidden"></div>
   <div id="feedback" class="hidden"></div>
   <div id="letters" class="hidden"></div>
+  <div id="resumes" class="hidden"></div>
   <div id="config" class="hidden"></div>
   <div id="runs" class="hidden"></div>
   <div id="errors" class="hidden"></div>
@@ -371,9 +436,9 @@ async function getJSON(url){
 }
 
 async function loadAll(){
-  const [sum, apps, fit, feedback, letters, runs, errors, cfg] = await Promise.all([
+  const [sum, apps, fit, feedback, letters, resumes, runs, errors, cfg] = await Promise.all([
     getJSON('/api/summary'), getJSON('/api/applications'), getJSON('/api/fit'),
-    getJSON('/api/feedback'), getJSON('/api/cover_letters'),
+    getJSON('/api/feedback'), getJSON('/api/cover_letters'), getJSON('/api/resumes'),
     getJSON('/api/runs'), getJSON('/api/errors'), getJSON('/api/config'),
   ]);
   const banner = document.getElementById('errbanner');
@@ -388,6 +453,7 @@ async function loadAll(){
   renderFit(fit || [], (sum && sum.fit) || {});
   renderFeedback(feedback || []);
   renderLetters(letters || []);
+  renderResumes(resumes || {});
   renderConfig(cfg || {});
   renderRuns(runs || []);
   renderErrors(errors || []);
@@ -528,6 +594,48 @@ function copyText(btn){
 }
 window.copyText = copyText;
 
+function renderResumes(d){
+  const el = document.getElementById('resumes');
+  d = d || {};
+  const files = d.files || [];
+  const used = d.used || [];
+  // Which resume is active
+  let active;
+  if (d.mode === 'static'){
+    active = d.static_available
+      ? `<b>Static</b> — every application uploads <a href="/resume-static" target="_blank">${esc(d.static_name)}</a>`
+      : `<b>Static</b> — but no valid file at the configured path (uploads will fall back)`;
+  } else {
+    active = `<b>Tailored</b> — a per-job résumé is generated from your profile for each application`;
+  }
+  const legend = `<div class="fit-legend">Résumé mode: ${active}
+      <div class="muted" style="margin-top:4px;">${files.length} generated PDFs on disk &middot; ${used.length} applications have a résumé on file. Click any to open.</div></div>`;
+
+  const usedBody = used.slice(0,300).map(r=>`<tr>
+      <td>${esc(r.company)}</td><td>${esc(r.job_title)}</td>
+      <td><a href="/resume/${encodeURIComponent(r.resume)}" target="_blank">${esc(r.resume.slice(0,44))}</a></td>
+      <td class="muted">${esc((r.applied_at||'').slice(0,10))}</td></tr>`).join('');
+  const usedTable = used.length
+    ? `<h3 style="margin:18px 0 8px;">Résumé used per application</h3>
+       <table><thead><tr><th>Company</th><th>Role</th><th>Résumé (click to open)</th><th>Applied</th></tr></thead><tbody>${usedBody}</tbody></table>`
+    : '';
+
+  const fileBody = files.slice(0,300).map(f=>`<tr>
+      <td><a href="/resume/${encodeURIComponent(f.name)}" target="_blank">${esc(f.name.slice(0,60))}</a></td>
+      <td class="muted">${f.size_kb} KB</td>
+      <td class="muted">${esc((f.modified||'').slice(0,10))}</td></tr>`).join('');
+  const fileTable = files.length
+    ? `<h3 style="margin:18px 0 8px;">All generated résumés (${files.length})</h3>
+       <table><thead><tr><th>File</th><th>Size</th><th>Created</th></tr></thead><tbody>${fileBody}</tbody></table>`
+    : '<div class="empty">No generated résumés on disk yet.</div>';
+
+  if (!files.length && !used.length && !d.static_available){
+    el.innerHTML = legend + '<div class="empty">No résumés to show yet. In tailored mode they appear here after the first application; in static mode set resume.static_resume_path.</div>';
+    return;
+  }
+  el.innerHTML = legend + usedTable + fileTable;
+}
+
 function renderLetters(rows){
   const el = document.getElementById('letters');
   if(!rows.length){
@@ -630,7 +738,7 @@ function renderErrors(rows){
 
 function showTab(t){
   document.querySelectorAll('.tab').forEach(el=>el.classList.toggle('active', el.dataset.tab===t));
-  ['apps','fit','feedback','letters','config','runs','errors'].forEach(id=>document.getElementById(id).classList.toggle('hidden', id!==t));
+  ['apps','fit','feedback','letters','resumes','config','runs','errors'].forEach(id=>document.getElementById(id).classList.toggle('hidden', id!==t));
 }
 
 loadAll();
