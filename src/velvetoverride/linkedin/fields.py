@@ -114,7 +114,7 @@ async def detect_form_fields(page: Page, scope=None) -> list[FormField]:
     checkboxes = root.locator('input[type="checkbox"]')
     for i in range(await checkboxes.count()):
         cb = checkboxes.nth(i)
-        if not await cb.is_visible():
+        if not await _input_interactable(cb):
             continue
         label = await _get_field_label(cb, page)
         fields.append(FormField(
@@ -244,6 +244,42 @@ async def _get_radio_group_label(radio, page: Page) -> str:
     return await _get_field_label(radio, page)
 
 
+async def _input_interactable(el: Locator) -> bool:
+    """True if a checkbox/radio input should be filled.
+
+    LinkedIn (and many ATS) visually hide the native <input> and render a
+    styled label as the clickable proxy, so Playwright's is_visible() on the
+    input returns False even though it is functional. Accept such inputs when
+    the input OR its label occupies space and the input is enabled and not
+    display:none/visibility:hidden — while still excluding disabled and truly
+    hidden template inputs.
+    """
+    try:
+        if await el.is_disabled():
+            return False
+    except Exception:
+        pass
+    try:
+        if await el.is_visible():
+            return True
+    except Exception:
+        pass
+    try:
+        return await el.evaluate(
+            "e => {"
+            " const s = getComputedStyle(e);"
+            " if (s.display === 'none' || s.visibility === 'hidden') return false;"
+            " const r = e.getBoundingClientRect();"
+            " let lbl = e.closest('label');"
+            " if (!lbl && e.id) lbl = document.querySelector(\"label[for='\" + e.id + \"']\");"
+            " const lr = lbl ? lbl.getBoundingClientRect() : null;"
+            " return (r.width > 0 && r.height > 0) || (!!lr && lr.width > 0 && lr.height > 0);"
+            "}"
+        )
+    except Exception:
+        return False
+
+
 async def _detect_radio_groups(root, page: Page) -> list[FormField]:
     """Detect radio button groups and return them as single fields."""
     groups: dict[str, FormField] = {}
@@ -251,7 +287,7 @@ async def _detect_radio_groups(root, page: Page) -> list[FormField]:
     radios = root.locator('input[type="radio"]')
     for i in range(await radios.count()):
         radio = radios.nth(i)
-        if not await radio.is_visible():
+        if not await _input_interactable(radio):
             continue
 
         name = await radio.get_attribute("name") or f"radio_group_{i}"

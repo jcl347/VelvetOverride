@@ -226,7 +226,8 @@ class ApplicationFlow:
                             if last_errors else
                             f"Stuck on form step {step + 1} (form not advancing)"
                         )
-                        log.error("apply.form_stuck_giveup", reason=reason)
+                        diag = await self._stuck_diagnostics(fields, modal)
+                        log.error("apply.form_stuck_giveup", reason=reason, diag=diag)
                         await self._dismiss_modal()
                         return self._make_record(listing, ApplicationStatus.FAILED, reason)
                 else:
@@ -346,6 +347,36 @@ class ApplicationFlow:
         except Exception:
             pass
         return None
+
+    async def _stuck_diagnostics(self, fields, modal) -> str:
+        """Capture a stuck form step — a screenshot plus each field's
+        label/type/required/value/options and any visible inline error — so we
+        can see which required field is unsatisfied (why Next won't advance)."""
+        try:
+            shot = str(Path("data") / "stuck_debug.png")
+            await self._page.screenshot(path=shot, full_page=False)
+        except Exception:
+            shot = "(screenshot failed)"
+        rows = []
+        for f in fields:
+            rows.append({
+                "label": (f.label or "")[:46],
+                "type": getattr(f.field_type, "value", str(f.field_type)),
+                "req": bool(getattr(f, "required", False)),
+                "val": (f.current_value or "")[:24],
+                "opts": (f.options or [])[:5],
+            })
+        errtext = []
+        try:
+            raw = await modal.locator(
+                '[role="alert"], [class*="error" i], [class*="artdeco-inline-feedback" i]'
+            ).all_inner_texts()
+            errtext = [t.strip() for t in raw if t.strip()][:6]
+        except Exception:
+            pass
+        import json as _json
+        return _json.dumps({"screenshot": shot, "fieldCount": len(fields),
+                            "fields": rows, "errorsVisible": errtext})[:1900]
 
     async def _dialog_diagnostics(self) -> str:
         """Summarize the apply UI on the page — dialogs AND apply buttons plus the
