@@ -169,8 +169,9 @@ async def _get_field_label(element: Locator, page: Page) -> str:
 
     # Strategy 3: associated <label> via 'for' attribute
     el_id = await element.get_attribute("id")
-    if el_id:
-        # escape quotes just in case
+    # Skip if the id would break the selector string (a stray quote raises,
+    # and this block is not try-wrapped — it would fail the whole application).
+    if el_id and '"' not in el_id and "\\" not in el_id:
         label_el = page.locator(f'label[for="{el_id}"]')
         if await label_el.count() > 0:
             text = await label_el.first.text_content()
@@ -352,7 +353,7 @@ async def _detect_radio_groups(root, page: Page) -> list[FormField]:
 async def _get_radio_option_label(radio: Locator, page: Page) -> str:
     """Get the label text for a single radio button option."""
     radio_id = await radio.get_attribute("id")
-    if radio_id:
+    if radio_id and '"' not in radio_id and "\\" not in radio_id:
         label = page.locator(f'label[for="{radio_id}"]')
         if await label.count() > 0:
             text = await label.text_content()

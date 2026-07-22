@@ -216,7 +216,7 @@ def create_app(db_path: str = "data/applications.db", resume_dir: str | Path | N
         # disk, and which resume each application actually used.
         from datetime import datetime, timezone
         resume_root = app.config["RESUME_DIR"]
-        mode, static_name = "tailored", ""
+        mode, static_name, static_exists = "tailored", "", False
         try:
             from velvetoverride.utils.config import load_config
             c = load_config()
@@ -224,6 +224,10 @@ def create_app(db_path: str = "data/applications.db", resume_dir: str | Path | N
             sp = c.resume_config.get("static_resume_path", "")
             if sp:
                 static_name = Path(sp).name
+                p = Path(sp)
+                if not p.is_absolute():
+                    p = Path.cwd() / p
+                static_exists = p.resolve().exists()
         except Exception:
             pass
         files = []
@@ -250,7 +254,7 @@ def create_app(db_path: str = "data/applications.db", resume_dir: str | Path | N
         finally:
             db.close()
         return jsonify({"mode": mode, "static_name": static_name,
-                        "static_available": bool(static_name),
+                        "static_available": static_exists,
                         "files": files, "used": used})
 
     @app.route("/resume-static")
@@ -285,9 +289,26 @@ def create_app(db_path: str = "data/applications.db", resume_dir: str | Path | N
         except AttributeError:  # Python < 3.9
             import os
             inside = os.path.commonpath([str(target), str(resume_root)]) == str(resume_root)
-        if not inside or not target.exists() or not target.is_file():
-            abort(404)
-        return send_file(str(target))
+        if inside and target.exists() and target.is_file():
+            return send_file(str(target))
+        # In static mode the résumé used lives OUTSIDE RESUME_DIR (e.g. repo
+        # root), so per-application links like /resume/<static-basename> would
+        # 404. Fall back to the configured static résumé when the basename
+        # matches it (exact configured path — no user-controlled traversal).
+        try:
+            from velvetoverride.utils.config import load_config
+            sp = load_config().resume_config.get("static_resume_path", "")
+        except Exception:
+            sp = ""
+        if sp:
+            p = Path(sp)
+            if not p.is_absolute():
+                p = Path.cwd() / p
+            p = p.resolve()
+            if (p.name == Path(name).name and p.exists() and p.is_file()
+                    and p.suffix.lower() in (".pdf", ".doc", ".docx")):
+                return send_file(str(p))
+        abort(404)
 
     @app.route("/api/errors")
     def api_errors() -> Any:

@@ -408,3 +408,80 @@ class TestAffiliationRouting:
                         FieldType.RADIO, options=["Yes", "No"])
         answer, _, _ = await solver.solve(f)
         assert answer == "No"
+
+
+class TestReviewBugFixes:
+    """Regression tests for the multi-agent bug review."""
+
+    def _cfg(self, **personal):
+        base = {"first_name": "Jordan", "last_name": "Limperis",
+                "email": "j@x.com", "city": "Seattle", "state": "Washington",
+                "zip": "98026", "phone": "555-0100"}
+        base.update(personal)
+        return Config(profile={"personal": base},
+                      answers={"yes_no": {"prev_emp": {"patterns": ["worked at"], "answer": False},
+                                          "relocate": {"patterns": ["relocate"], "answer": True}},
+                               "eeo": {"patterns": ["gender", "race"], "decline_keywords": ["decline", "prefer not"]}})
+
+    @pytest.mark.asyncio
+    async def test_referee_field_not_applicant_name(self):
+        fs = FieldSolver(self._cfg(), llm=None)
+        for label in ("Referee's last name", "Referee first name"):
+            ans, src, _ = await fs.solve(_make_field(label, FieldType.TEXT))
+            assert ans not in ("Limperis", "Jordan"), label
+
+    @pytest.mark.asyncio
+    async def test_state_substring_not_matched_in_textarea(self):
+        fs = FieldSolver(self._cfg(), llm=None)
+        # "Personal statement" contains "state" but must NOT get "Washington"
+        ans, src, _ = await fs.solve(_make_field("Personal statement", FieldType.TEXTAREA))
+        assert ans != "Washington"
+        # and "capacity" must not get the city
+        ans2, _, _ = await fs.solve(_make_field("In what capacity did you work?", FieldType.TEXT))
+        assert ans2 != "Seattle"
+
+    @pytest.mark.asyncio
+    async def test_state_still_fills_a_real_state_field(self):
+        fs = FieldSolver(self._cfg(), llm=None)
+        ans, src, _ = await fs.solve(_make_field("State", FieldType.TEXT))
+        assert ans == "Washington"
+
+    @pytest.mark.asyncio
+    async def test_config_yesno_not_typed_into_textarea(self):
+        fs = FieldSolver(self._cfg(), llm=None)
+        # "Please list companies you have worked at" matches "worked at" but is a
+        # textarea — must not get "No".
+        ans, src, _ = await fs.solve(_make_field("Please list companies you have worked at",
+                                                 FieldType.TEXTAREA))
+        assert ans not in ("No", "Yes")
+
+    @pytest.mark.asyncio
+    async def test_config_yesno_still_answers_radio(self):
+        fs = FieldSolver(self._cfg(), llm=None)
+        ans, src, _ = await fs.solve(_make_field("Have you worked at a competitor?",
+                                                 FieldType.RADIO, options=["Yes", "No"]))
+        assert ans == "No"
+
+    @pytest.mark.asyncio
+    async def test_eeo_dropdown_no_decline_option_does_not_pick_real_value(self):
+        fs = FieldSolver(self._cfg(), llm=None)
+        # A gender dropdown with NO decline option must not select "Female" etc.
+        f = _make_field("Gender", FieldType.DROPDOWN, options=["Male", "Female", "Non-binary"])
+        ans, _, _ = await fs.solve(f)
+        assert ans not in ("Male", "Female", "Non-binary")
+
+    @pytest.mark.asyncio
+    async def test_eeo_dropdown_picks_decline_when_present(self):
+        fs = FieldSolver(self._cfg(), llm=None)
+        f = _make_field("Race/Ethnicity", FieldType.DROPDOWN,
+                        options=["White", "Asian", "Prefer not to answer"])
+        ans, _, _ = await fs.solve(f)
+        assert ans == "Prefer not to answer"
+
+    @pytest.mark.asyncio
+    async def test_learned_sentinel_does_not_poison_unlabeled(self):
+        cfg = self._cfg()
+        cfg.answers["learned"] = {"unknown_field": {"answer": "LEAKED", "field_type": "text"}}
+        fs = FieldSolver(cfg, llm=None)
+        ans, src, _ = await fs.solve(_make_field("unknown_field", FieldType.CHECKBOX))
+        assert ans != "LEAKED"  # checkbox safety wins, not the learned sentinel

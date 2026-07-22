@@ -16,6 +16,9 @@ class _FakeLocator:
     async def count(self):
         return self._count
 
+    def nth(self, i):  # every dialog in this fake has the same text
+        return self
+
     async def inner_text(self, timeout=None):
         return self._text
 

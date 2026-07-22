@@ -61,7 +61,10 @@ class FieldSolver:
         # the other AND the shorter being reasonably long) to avoid a short
         # learned key poisoning unrelated fields. Tolerate malformed entries.
         learned = self._answers.get("learned", {})
-        if learned:
+        # Never match learned answers for an unidentified field — the sentinel
+        # "unknown_field" would otherwise let one learned entry answer every
+        # unlabeled control (and bypass the unlabeled-checkbox safety below).
+        if learned and label and label != "unknown_field":
             for question_text, entry in learned.items():
                 if not isinstance(entry, dict) or "answer" not in entry:
                     continue
@@ -221,6 +224,13 @@ class FieldSolver:
             if any(p.lower() in label for p in patterns):
                 answer = entry.get("answer")
                 if isinstance(answer, bool):
+                    # A Yes/No answer belongs only in a choice field. A textarea
+                    # like "Please list companies you have worked at" happens to
+                    # contain "worked at" — do NOT type "No" into it.
+                    if field.field_type not in (
+                        FieldType.RADIO, FieldType.DROPDOWN, FieldType.CHECKBOX
+                    ):
+                        continue
                     return "Yes" if answer else "No"
                 return str(answer)
 
@@ -335,9 +345,10 @@ class FieldSolver:
         # referred") instead of typing "Limperis" into a referral box.
         if any(x in label for x in (
             "company", "organization", "organisation", "employer", "file",
-            "username", "user name", "reference", "referred", "referral",
-            "referrer", "who referred", "their ", "his ", "her ", "manager",
-            "supervisor", "school", "university", "institution", "product",
+            "username", "user name", "reference", "referee", "referred",
+            "referral", "referrer", "who referred", "their ", "his ", "her ",
+            "manager", "supervisor", "colleague", "co-worker", "coworker",
+            "school", "university", "institution", "product",
             "emergency", "next of kin", "spouse", "contact name", "parent",
             "guardian", "recruiter", "someone", "person who",
         )):
@@ -409,12 +420,15 @@ class FieldSolver:
             "postal": personal.get("zip"),
         }
 
-        for pattern, value in mappings.items():
-            # Don't let "country" match a "country code" label (handled above)
-            if pattern == "country" and "code" in label:
-                continue
-            if pattern in label and value:
-                return value
+        # Identity values belong in short fields, never a free-text narrative —
+        # and match on WORD BOUNDARIES so "state" != "statement", "city" !=
+        # "capacity", "phone" != "smartphone".
+        if field.field_type != FieldType.TEXTAREA:
+            for pattern, value in mappings.items():
+                if pattern == "country" and "code" in label:
+                    continue
+                if value and re.search(r"\b" + re.escape(pattern) + r"\b", label):
+                    return value
 
         # LinkedIn URL
         text_defaults = self._answers.get("text_defaults", {})
@@ -531,23 +545,32 @@ class FieldSolver:
         if not any(p.lower() in label for p in patterns):
             return None
 
-        # For dropdowns, try to find a "decline" option
-        if field.field_type == FieldType.DROPDOWN and field.options:
-            decline_kws = eeo.get("decline_keywords", [])
-            for option in field.options:
-                if any(kw.lower() in option.lower() for kw in decline_kws):
-                    return option
-            # If no decline option found, return the last option (often "prefer not to say")
-            return field.options[-1]
-
-        # For radio buttons
-        if field.field_type == FieldType.RADIO and field.options:
-            decline_kws = eeo.get("decline_keywords", [])
-            for option in field.options:
-                if any(kw.lower() in option.lower() for kw in decline_kws):
-                    return option
+        # For dropdowns/radios, pick the "decline to answer" option.
+        if field.field_type in (FieldType.DROPDOWN, FieldType.RADIO) and field.options:
+            opt = self._eeo_decline_option(field.options)
+            if opt is not None:
+                return opt
+            # No decline-like option found — do NOT fall back to a real value
+            # (e.g. the last option could be a specific race/gender). Return the
+            # decline phrase; if it matches no option the field is left at its
+            # default rather than disclosing a demographic the user withheld.
+            return "Prefer not to say"
 
         return "Prefer not to say"
+
+    def _eeo_decline_option(self, options: list[str]) -> str | None:
+        """Return the option that declines to self-identify, or None."""
+        kws = [str(k).lower() for k in
+               self._answers.get("eeo", {}).get("decline_keywords", [])] + [
+            "decline", "prefer not", "do not wish", "don't wish", "not to answer",
+            "not to disclose", "not to say", "opt out", "choose not", "rather not",
+            "no answer", "not specified", "prefer to self",
+        ]
+        for option in options:
+            ol = (option or "").lower()
+            if any(kw in ol for kw in kws):
+                return option
+        return None
 
     def _resolve_experience_years(self, label: str) -> str | None:
         """Match a technology in the question to the profile's years.

@@ -630,14 +630,37 @@ class ApplicationFlow:
             "your application has been submitted",
             "application submitted successfully",
         )
-        # Prefer a post-apply dialog if one is present; else the whole body.
-        try:
-            dialog = self._page.locator('dialog, div[role="dialog"], .artdeco-modal')
-            scope = dialog.first if await dialog.count() > 0 else self._page.locator("body")
-            text = (await scope.inner_text(timeout=3000) or "").lower()
-        except Exception:
-            text = ""
-        return any(p in text for p in confirm_phrases)
+        # During the submit transition LinkedIn briefly shows TWO dialogs (the
+        # closing form + the opening "application sent" confirmation), so check
+        # EVERY dialog, not just .first — and retry briefly, since the confirm
+        # dialog animates in and can auto-dismiss. Missing it records a genuine
+        # submission as FAILED, which then re-applies (a duplicate) next run.
+        async def _seen() -> bool:
+            try:
+                dialogs = self._page.locator('dialog, div[role="dialog"], .artdeco-modal')
+                n = await dialogs.count()
+            except Exception:
+                n = 0
+            for i in range(min(n, 5)):
+                try:
+                    t = (await dialogs.nth(i).inner_text(timeout=1500) or "").lower()
+                except Exception:
+                    continue
+                if any(p in t for p in confirm_phrases):
+                    return True
+            # Fall back to the whole page (confirmation can render inline).
+            try:
+                body = (await self._page.locator("body").inner_text(timeout=2000) or "").lower()
+                return any(p in body for p in confirm_phrases)
+            except Exception:
+                return False
+
+        for attempt in range(3):
+            if await _seen():
+                return True
+            if attempt < 2:
+                await random_delay(0.8, 1.5)
+        return False
 
     async def _is_easy_apply(self) -> bool:
         """True if the current job uses in-app Easy Apply (not an external site)."""
@@ -1014,7 +1037,7 @@ class ApplicationFlow:
                 if should_check != is_checked:
                     # Click the visible label proxy — the native checkbox is
                     # visually hidden and not directly clickable.
-                    await self._click_choice_input(field.locator)
+                    await self._click_choice_input(field.locator, desired=should_check)
 
             case FieldType.FILE_UPLOAD:
                 if value and Path(value).exists():
@@ -1086,7 +1109,10 @@ class ApplicationFlow:
                 tl = text.lower()
                 if not tl:
                     continue
-                if value_l == tl or value_l in tl or tl in value_l:
+                # Exact, or a substantial substring either way (len>=3 so "no"
+                # doesn't match "None", "male" doesn't match "female", etc.).
+                if value_l == tl or (len(value_l) >= 3 and value_l in tl) or \
+                   (len(tl) >= 3 and tl in value_l):
                     best = text
                     break
             if best is not None:
@@ -1094,23 +1120,25 @@ class ApplicationFlow:
                 return
         except Exception:
             pass
-        # 3) Last resort: first non-placeholder option
-        try:
-            await field.locator.select_option(index=1, timeout=3000)
-        except Exception as e:
-            log.warning("apply.dropdown_unresolved", label=field.label, value=value, error=str(e)[:80])
+        # 3) No confident match — do NOT pick an arbitrary option. Selecting a
+        #    real value (index=1) could submit a wrong answer or disclose an EEO
+        #    demographic the user withheld. Leave it unselected.
+        log.warning("apply.dropdown_unresolved", label=field.label, value=value)
 
-    async def _click_choice_input(self, inp) -> bool:
+    async def _click_choice_input(self, inp, desired: bool | None = None) -> bool:
         """Select a radio/checkbox by its VISIBLE proxy.
 
         LinkedIn hides the native <input> and renders a styled <label> as the
         clickable element, so clicking the input itself is not actionable. Try
-        label[for=id], then a wrapping <label>, then a force click / .check().
-        Returns True if the option was toggled.
+        label[for=id], then a wrapping <label>, then a force click. ``desired``
+        is the target checked-state for a checkbox (None for radios, which are
+        always selected). The last-resort uses .check()/.uncheck() to match the
+        desired state — never blindly check (which would flip an intended
+        uncheck the wrong way).
         """
         try:
             iid = await inp.get_attribute("id")
-            if iid:
+            if iid and '"' not in iid and "\\" not in iid:
                 lbl = self._page.locator(f'label[for="{iid}"]')
                 if await lbl.count() > 0 and await lbl.first.is_visible():
                     await lbl.first.click()
@@ -1130,7 +1158,10 @@ class ApplicationFlow:
         except Exception:
             pass
         try:
-            await inp.check(force=True, timeout=3000)
+            if desired is False:
+                await inp.uncheck(force=True, timeout=3000)
+            else:
+                await inp.check(force=True, timeout=3000)
             return True
         except Exception:
             return False
@@ -1151,7 +1182,7 @@ class ApplicationFlow:
             radio = radios.nth(i)
             radio_id = await radio.get_attribute("id")
             matched = False
-            if radio_id:
+            if radio_id and '"' not in radio_id and "\\" not in radio_id:
                 label = self._page.locator(f'label[for="{radio_id}"]')
                 if await label.count() > 0:
                     label_text = (await label.text_content() or "").strip().lower()
@@ -1172,9 +1203,31 @@ class ApplicationFlow:
                 await self._click_choice_input(radio)
                 return
 
-        # Fallback: click first option if it's a yes/no and value suggests yes
-        if value_lower in ("yes", "true") and await radios.count() > 0:
-            await self._click_choice_input(radios.first)
+        # Fallback: if affirmative, find the option whose label actually reads
+        # "yes" — never assume the FIRST radio is Yes (a group may render No
+        # first, which would flip the answer). If there's no yes option, leave
+        # it unselected rather than guessing wrong.
+        if value_lower in ("yes", "true"):
+            n = await radios.count()
+            for i in range(n):
+                r = radios.nth(i)
+                try:
+                    rid = await r.get_attribute("id")
+                    txt = ""
+                    if rid and '"' not in rid and "\\" not in rid:
+                        lab = self._page.locator(f'label[for="{rid}"]')
+                        if await lab.count() > 0:
+                            txt = (await lab.first.text_content() or "").strip().lower()
+                    if not txt:
+                        wrap = r.locator("xpath=ancestor::label[1]")
+                        if await wrap.count() > 0:
+                            txt = (await wrap.first.text_content() or "").strip().lower()
+                    if txt == "yes" or txt.startswith("yes"):
+                        await self._click_choice_input(r)
+                        return
+                except Exception:
+                    continue
+            log.warning("apply.radio_no_yes_option", label=field.label)
 
     async def _resolve_nav_button_llm(self, listing, allow_submit: bool):
         """Dynamic fallback for a missing Next/Submit button.
@@ -1216,7 +1269,15 @@ class ApplicationFlow:
             return "", ""
 
         is_submit = any(k in choice.lower()
-                        for k in ("submit", "send application", "finish"))
+                        for k in ("submit application", "submit", "send application",
+                                  "finish"))
+        # SAFETY: never CLICK a terminal/submit button when submission isn't
+        # allowed (dry-run, or external_apply.submit=false). Return the decision
+        # WITHOUT clicking so the caller records DRY_RUN instead of submitting.
+        if is_submit and not allow_submit:
+            log.info("apply.dynamic_button_hold", chosen=choice,
+                     reason="submit not allowed (dry-run)")
+            return "submit", choice
         log.info("apply.dynamic_button", chosen=choice, via=via,
                  is_submit=is_submit, buttons=labels[:8])
         # Indicate on the dashboard that a dynamic (AI-assisted) resolution ran.
@@ -1304,22 +1365,30 @@ class ApplicationFlow:
             return "next", found_next
         return None, None
 
+    async def _nav_scope(self):
+        """Scope Next/Submit lookups to the Easy Apply modal so stray page-wide
+        buttons (page chrome behind the modal) can't be matched."""
+        modal = await self._easy_apply_modal()
+        return modal if modal is not None else self._page
+
     async def _is_review_step(self) -> bool:
-        """Check if the current step has a Submit/Review button."""
-        submit_btn = self._page.locator(SUBMIT_SELECTOR)
-        return await submit_btn.count() > 0
+        """Check if the current step has a Submit/Review button (modal-scoped)."""
+        scope = await self._nav_scope()
+        return await scope.locator(SUBMIT_SELECTOR).count() > 0
 
     async def _has_next_button(self) -> bool:
-        next_btn = self._page.locator(NEXT_SELECTOR)
-        return await next_btn.count() > 0
+        scope = await self._nav_scope()
+        return await scope.locator(NEXT_SELECTOR).count() > 0
 
     async def _click_next(self) -> None:
-        next_btn = self._page.locator(NEXT_SELECTOR)
+        scope = await self._nav_scope()
+        next_btn = scope.locator(NEXT_SELECTOR)
         if await next_btn.count() > 0:
             await self._scroll_and_click(next_btn.first)
 
     async def _click_submit(self) -> None:
-        submit_btn = self._page.locator(SUBMIT_SELECTOR)
+        scope = await self._nav_scope()
+        submit_btn = scope.locator(SUBMIT_SELECTOR)
         if await submit_btn.count() > 0:
             await self._scroll_and_click(submit_btn.first)
 

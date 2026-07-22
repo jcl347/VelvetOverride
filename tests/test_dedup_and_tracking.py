@@ -197,3 +197,21 @@ def test_count_errors_by_stage(tmp_path):
     assert db.count_errors_by_stage("apply") == 1
     assert db.count_errors_by_stage("nonexistent") == 0
     db.close()
+
+
+def test_error_count_excludes_informational_and_non_failures(tmp_path):
+    from velvetoverride.tracking.database import TrackingDB
+    db = TrackingDB(tmp_path / "e.db"); db.connect()
+    db.log_error(stage="apply", message="real failure")                       # counts
+    db.log_error(stage="fatal", message="crash")                              # counts
+    db.log_error(stage="apply_outcome", error_type="failed", message="f")     # counts
+    db.log_error(stage="apply_outcome", error_type="needs_review", message="ok")  # NOT
+    db.log_error(stage="apply_outcome", error_type="skipped", message="dup")   # NOT
+    db.log_error(stage="nav_assist", message="AI button")                     # NOT
+    db.log_error(stage="field_audit", message="routing")                      # NOT
+    assert db.error_count() == 3
+    # nav_assist has its own counter and stays out of the errors feed
+    assert db.count_errors_by_stage("nav_assist") == 1
+    feed_stages = {e["stage"] for e in db.get_errors()}
+    assert "nav_assist" not in feed_stages and "field_audit" not in feed_stages
+    db.close()

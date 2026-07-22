@@ -525,6 +525,16 @@ Rules:
         if not button_labels:
             return ""
 
+        # When submission isn't allowed (dry-run / fill-only), REMOVE terminal
+        # buttons from the candidates so the model can't pick one — a hard guard
+        # beyond the prompt wording.
+        if not allow_submit:
+            terminal = ("submit application", "submit", "send application", "finish")
+            button_labels = [b for b in button_labels
+                             if not any(t in b.lower() for t in terminal)]
+            if not button_labels:
+                return ""
+
         numbered = "\n".join(f"{i+1}. {b}" for i, b in enumerate(button_labels))
         submit_rule = (
             "- Prefer buttons that advance the form (Next, Continue, Save and continue, Review)."

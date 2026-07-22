@@ -132,3 +132,16 @@ def test_date_posted_override_builds_correct_fTPR():
     _apply_search_overrides(c, ["Software Engineer"], None, None, "past_3_days")
     url = build_search_url(c, keyword="Software Engineer")
     assert "f_TPR=r259200" in url
+
+
+def test_posted_any_override_is_applied():
+    # "any" is valid (clears the filter) even though date_posted_param("any")=="".
+    c = Config(settings={"search": {"date_posted": "past_week"}})
+    _apply_search_overrides(c, None, None, None, "any")
+    assert c.search["date_posted"] == "any"
+
+
+def test_posted_garbage_override_rejected():
+    c = Config(settings={"search": {"date_posted": "past_week"}})
+    _apply_search_overrides(c, None, None, None, "nonsense")
+    assert c.search["date_posted"] == "past_week"  # unchanged

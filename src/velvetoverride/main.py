@@ -249,13 +249,23 @@ async def run_bot(
             is_fuzzy_dup = False
             if similar:
                 from thefuzz import fuzz
+                lt = (listing.title or "").lower()
+                lc = (listing.company or "").lower().strip()
                 for s in similar:
                     if s.status in ("failed", "skipped"):
                         continue
-                    if fuzz.ratio(listing.title.lower(), s.job_title.lower()) > 85:
+                    # BOTH title AND company must match — find_similar_jobs also
+                    # returns same-title rows at OTHER companies (via its OR/LIKE),
+                    # so comparing title alone would skip a valid job at a
+                    # different employer (e.g. every "Software Engineer" after the
+                    # first). Require the company to match too.
+                    sc = (s.company or "").lower().strip()
+                    company_match = bool(lc) and bool(sc) and (
+                        lc == sc or fuzz.ratio(lc, sc) > 88)
+                    if company_match and fuzz.ratio(lt, s.job_title.lower()) > 85:
                         log.info(
                             "bot.skip_fuzzy_dup",
-                            title=listing.title,
+                            title=listing.title, company=listing.company,
                             existing=s.job_title,
                         )
                         is_fuzzy_dup = True
@@ -331,7 +341,9 @@ async def run_bot(
                         continue
 
             # JD-keyword blacklist (applied now that we have the full description)
-            blacklist_kw = [k.lower() for k in config.search.get("blacklist_keywords", [])]
+            # Guard against a blank entry ("" is a substring of everything, which
+            # would skip every job).
+            blacklist_kw = [k.lower() for k in config.search.get("blacklist_keywords", []) if k]
             if listing.description and any(k in listing.description.lower() for k in blacklist_kw):
                 log.info("bot.skip_blacklisted_keyword", title=listing.title, company=listing.company)
                 skipped_count += 1
@@ -594,7 +606,9 @@ def _apply_search_overrides(config, keywords, locations, experience=None,
     if date_posted:
         from velvetoverride.linkedin.search import date_posted_param
         key = str(date_posted).strip().lower()
-        if date_posted_param(key):
+        # "any" is valid (clears the recency filter) but date_posted_param("any")
+        # returns "" — gate on validity, not truthiness, so -d any isn't dropped.
+        if key == "any" or date_posted_param(key):
             config.settings.setdefault("search", {})["date_posted"] = key
         else:
             log.warning("bot.unknown_date_posted", value=date_posted,

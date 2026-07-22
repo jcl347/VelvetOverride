@@ -292,21 +292,39 @@ class TrackingDB:
         except Exception as e:  # never let error logging crash the bot
             log.warning("tracking.log_error_failed", error=str(e))
 
+    # The errors table doubles as an event log; these stages are informational
+    # (surfaced elsewhere: the AI-resolution card and the Feedback tab), not
+    # failures, so they're excluded from the "errors" count and feed.
+    _INFO_STAGES = ("nav_assist", "field_audit")
+
     def get_errors(self, limit: int = 100, run_id: int | None = None) -> list[dict]:
-        """Retrieve recorded errors, most recent first."""
+        """Retrieve recorded errors/failures, most recent first (informational
+        events like AI button resolutions and routing feedback excluded)."""
+        info = ",".join("?" for _ in self._INFO_STAGES)
         if run_id is not None:
             rows = self.conn.execute(
-                "SELECT * FROM errors WHERE run_id = ? ORDER BY occurred_at DESC LIMIT ?",
-                (run_id, limit),
+                f"SELECT * FROM errors WHERE run_id = ? AND stage NOT IN ({info}) "
+                "ORDER BY occurred_at DESC LIMIT ?",
+                (run_id, *self._INFO_STAGES, limit),
             ).fetchall()
         else:
             rows = self.conn.execute(
-                "SELECT * FROM errors ORDER BY occurred_at DESC LIMIT ?", (limit,)
+                f"SELECT * FROM errors WHERE stage NOT IN ({info}) "
+                "ORDER BY occurred_at DESC LIMIT ?",
+                (*self._INFO_STAGES, limit),
             ).fetchall()
         return [dict(r) for r in rows]
 
     def error_count(self) -> int:
-        return self.conn.execute("SELECT COUNT(*) FROM errors").fetchone()[0]
+        """Count of genuine errors/failures for the dashboard card — excludes
+        informational events, and non-failure outcomes (needs_review/skipped
+        are successes/dedup, not errors)."""
+        info = ",".join("?" for _ in self._INFO_STAGES)
+        return self.conn.execute(
+            f"SELECT COUNT(*) FROM errors WHERE stage NOT IN ({info}) "
+            "AND NOT (stage = 'apply_outcome' AND error_type IN ('needs_review','skipped'))",
+            self._INFO_STAGES,
+        ).fetchone()[0]
 
     def count_errors_by_stage(self, stage: str) -> int:
         """Count recorded events at a given stage (e.g. 'nav_assist' — the
@@ -411,8 +429,10 @@ class TrackingDB:
         if existing is not None:
             app_id = existing["id"]
             self.conn.execute(
+                # COALESCE(NULLIF(?,''), job_id): a retry whose re-scrape failed
+                # to extract the job_id must not ERASE a job_id captured earlier.
                 """UPDATE applications SET
-                   job_id = ?, job_title = ?, company = ?, location = ?,
+                   job_id = COALESCE(NULLIF(?, ''), job_id), job_title = ?, company = ?, location = ?,
                    job_description = ?, status = ?, resume_version = ?,
                    match_score = ?, applied_at = ?, notes = ?, screenshot_path = ?,
                    salary_min = ?, salary_max = ?, salary_raw = ?, run_id = ?,
