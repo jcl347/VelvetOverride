@@ -337,3 +337,34 @@ class TestSkipFields:
             _make_field("Salary expectations story", FieldType.TEXTAREA))
         assert answer is None
         assert source == "skip"
+
+
+class TestCheckboxSafety:
+    """An unlabeled/unidentifiable checkbox must never be auto-ticked."""
+
+    @pytest.fixture
+    def solver(self, config):
+        return FieldSolver(config, llm=None)
+
+    @pytest.mark.asyncio
+    async def test_unlabeled_checkbox_not_checked(self, solver):
+        for label in ("", "unknown_field", "  "):
+            f = _make_field(label, FieldType.CHECKBOX)
+            answer, source, _ = await solver.solve(f)
+            assert answer == "No", f"label={label!r}"
+
+    @pytest.mark.asyncio
+    async def test_consent_checkbox_still_checked(self, solver):
+        f = _make_field("I agree to the terms and privacy policy", FieldType.CHECKBOX)
+        answer, source, _ = await solver.solve(f)
+        assert answer == "Yes"
+
+    @pytest.mark.asyncio
+    async def test_unlabeled_checkbox_never_reaches_llm(self, config):
+        # Even with an LLM available, an unlabeled checkbox is decided locally.
+        class _BoomLLM:
+            def answer_field(self, **k): raise AssertionError("LLM must not be called")
+        solver = FieldSolver(config, _BoomLLM())
+        f = _make_field("unknown_field", FieldType.CHECKBOX)
+        answer, _, _ = await solver.solve(f)
+        assert answer == "No"

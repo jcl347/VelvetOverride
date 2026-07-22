@@ -140,38 +140,78 @@ async def detect_form_fields(page: Page, scope=None) -> list[FormField]:
 
 
 async def _get_field_label(element: Locator, page: Page) -> str:
-    """Try multiple strategies to find the label for a form element."""
+    """Try multiple strategies to find the label for a form element.
+
+    Ordered from most to least reliable, and resilient to LinkedIn's obfuscated
+    CSS classes: aria-label, aria-labelledby, label[for], a wrapping <label>,
+    placeholder, a nearby label/legend, then name.
+    """
     # Strategy 1: aria-label attribute
     aria_label = await element.get_attribute("aria-label")
-    if aria_label:
+    if aria_label and aria_label.strip():
         return aria_label.strip()
 
-    # Strategy 2: associated <label> via 'for' attribute
+    # Strategy 2: aria-labelledby -> text of referenced element(s)
+    labelledby = await element.get_attribute("aria-labelledby")
+    if labelledby:
+        parts = []
+        for ref in labelledby.split():
+            try:
+                ref_el = page.locator(f'#{ref}')
+                if await ref_el.count() > 0:
+                    t = (await ref_el.first.text_content()) or ""
+                    if t.strip():
+                        parts.append(t.strip())
+            except Exception:
+                pass
+        if parts:
+            return " ".join(parts)[:200]
+
+    # Strategy 3: associated <label> via 'for' attribute
     el_id = await element.get_attribute("id")
     if el_id:
+        # escape quotes just in case
         label_el = page.locator(f'label[for="{el_id}"]')
         if await label_el.count() > 0:
-            text = await label_el.text_content()
-            if text:
+            text = await label_el.first.text_content()
+            if text and text.strip():
                 return text.strip()
 
-    # Strategy 3: placeholder
+    # Strategy 4: a wrapping <label> (common for checkboxes/radios:
+    # <label><input ...>Text</label>) — obfuscation-proof.
+    try:
+        wrap = element.locator("xpath=ancestor::label[1]")
+        if await wrap.count() > 0:
+            text = await wrap.first.text_content()
+            if text and text.strip():
+                return text.strip()[:200]
+    except Exception:
+        pass
+
+    # Strategy 5: placeholder
     placeholder = await element.get_attribute("placeholder")
-    if placeholder:
+    if placeholder and placeholder.strip():
         return placeholder.strip()
 
-    # Strategy 4: closest parent with label-like class
-    parent = element.locator("xpath=ancestor::div[contains(@class, 'form-element') or contains(@class, 'fb-form')]")
-    if await parent.count() > 0:
-        label_in_parent = parent.first.locator("label, .fb-form-element-label, .artdeco-text-input--label")
-        if await label_in_parent.count() > 0:
-            text = await label_in_parent.first.text_content()
-            if text:
-                return text.strip()
+    # Strategy 6: nearest label / legend in an ancestor group (class-agnostic)
+    try:
+        anc = element.locator(
+            "xpath=ancestor::*[self::fieldset or @role='group' or "
+            "contains(@class,'form-element') or contains(@class,'fb-form')][1]"
+        )
+        if await anc.count() > 0:
+            lbl = anc.first.locator("label, legend, .fb-form-element-label, "
+                                    ".artdeco-text-input--label")
+            if await lbl.count() > 0:
+                text = await lbl.first.text_content()
+                if text and text.strip():
+                    return text.strip()[:200]
+    except Exception:
+        pass
 
-    # Strategy 5: name attribute as last resort
+    # Strategy 7: name attribute as last resort
     name = await element.get_attribute("name")
-    if name:
+    if name and name.strip():
         return name.strip()
 
     return "unknown_field"

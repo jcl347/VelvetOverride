@@ -68,7 +68,12 @@ class FieldSolver:
                 q = str(question_text).lower().strip()
                 if not q or len(q) < 6:
                     continue
-                strong = q == label or (len(q) >= 12 and (q in label or label in q))
+                # Containment match requires the SHORTER string to be substantial,
+                # otherwise an empty/short label ("" is a substring of everything)
+                # would inherit an unrelated learned answer.
+                strong = q == label or (
+                    min(len(q), len(label)) >= 12 and (q in label or label in q)
+                )
                 if strong:
                     log.debug("solver.learned_match", label=field.label)
                     return entry.get("answer"), "learned", False
@@ -105,6 +110,16 @@ class FieldSolver:
         if field.field_type == FieldType.CHECKBOX and self._is_consent_checkbox(label):
             log.debug("solver.checkbox_consent", label=field.label[:60])
             return "Yes", "config", False
+
+        # ── Tier 5a-bis: Safety — never blindly TICK a checkbox we can't read ──
+        # An unlabeled / unidentifiable checkbox must stay UNCHECKED. Left to the
+        # LLM it answers "Yes" for an empty prompt and opts the user into
+        # something unknown (marketing, an affiliation, a false certification).
+        if field.field_type == FieldType.CHECKBOX:
+            lbl = (label or "").strip()
+            if not lbl or lbl in ("unknown_field",) or len(lbl) < 3:
+                log.info("solver.checkbox_unlabeled_unchecked", label=field.label[:60])
+                return "No", "config", True
 
         # ── Tier 5b: "Generally yes" default for unknown yes/no questions ──
         # Config negatives (sponsorship, non-compete, prior employee) already

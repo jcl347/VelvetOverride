@@ -226,7 +226,7 @@ class ApplicationFlow:
                             if last_errors else
                             f"Stuck on form step {step + 1} (form not advancing)"
                         )
-                        diag = await self._stuck_diagnostics(fields, modal)
+                        diag = await self._stuck_diagnostics(fields, modal, listing)
                         log.error("apply.form_stuck_giveup", reason=reason, diag=diag)
                         await self._dismiss_modal()
                         return self._make_record(listing, ApplicationStatus.FAILED, reason)
@@ -348,12 +348,17 @@ class ApplicationFlow:
             pass
         return None
 
-    async def _stuck_diagnostics(self, fields, modal) -> str:
+    async def _stuck_diagnostics(self, fields, modal, listing=None) -> str:
         """Capture a stuck form step — a screenshot plus each field's
         label/type/required/value/options and any visible inline error — so we
-        can see which required field is unsatisfied (why Next won't advance)."""
+        can see which required field is unsatisfied (why Next won't advance).
+        Screenshot filename is per-company so a sampling run keeps them all."""
         try:
-            shot = str(Path("data") / "stuck_debug.png")
+            comp = "".join(ch for ch in (getattr(listing, "company", "") or "form")
+                           if ch.isalnum() or ch in " _-")[:40].strip().replace(" ", "_")
+            debug_dir = Path("data") / "debug"
+            debug_dir.mkdir(parents=True, exist_ok=True)
+            shot = str(debug_dir / f"stuck_{comp or 'form'}.png")
             await self._page.screenshot(path=shot, full_page=False)
         except Exception:
             shot = "(screenshot failed)"
