@@ -53,13 +53,23 @@ search:
     - "Machine Learning Engineer"
     - "Algorithm Engineer"
     - "Data Engineer"
-  # Seattle metro + nationwide (the latter surfaces remote roles, which are the
-  # bulk of available Easy Apply supply once local listings are exhausted).
+  # FOCUS: Seattle + remote. Search Seattle (all local work types) and the US
+  # (for remote roles); location_focus below then drops anything that is neither
+  # Seattle-metro nor remote, so nationwide on-site jobs are not applied to.
   locations:
     - "Seattle, Washington, United States"
-    - "Bellevue, Washington, United States"
-    - "Redmond, Washington, United States"
     - "United States"
+  # Only apply to jobs whose location is remote OR contains one of these
+  # substrings (case-insensitive). Empty list = no location filtering.
+  location_focus:
+    - "seattle"
+    - "bellevue"
+    - "redmond"
+    - "kirkland"
+    - "bothell"
+    - "renton"
+    - "everett"
+    - "tacoma"
   # Filter to Easy Apply only. Set false to ALSO surface external-ATS jobs
   # (requires external_apply.enabled: true to actually apply to them).
   easy_apply_only: true
@@ -187,10 +197,10 @@ resume:
   #                aligned to each JD. Requires an LLM key for best results.
   #   "static"   — always upload YOUR OWN resume file (static_resume_path); no
   #                generation. Use this to bring your own polished resume.
-  mode: "tailored"
+  mode: "static"
   # Path to your own resume PDF/DOCX. Used directly in "static" mode, and as the
   # fallback in "tailored" mode if generation fails. Absolute or repo-relative.
-  static_resume_path: ""
+  static_resume_path: "Jordan_Limperis_Resume_DS_rs.pdf"
   # Template to use (filename without extension in src/velvetoverride/resume/templates/)
   template: "default"
   # Target ATS keyword coverage (0.0 - 1.0)

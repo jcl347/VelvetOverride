@@ -854,9 +854,15 @@ class ApplicationFlow:
     @staticmethod
     def _heuristic_next_button(buttons: list[str], allow_submit: bool) -> str:
         """Fallback button choice when the LLM abstains."""
-        forward = ["next", "continue", "save and continue", "review", "proceed", "start application"]
-        submit = ["submit application", "submit", "send application", "finish", "apply"]
-        avoid = ["cancel", "back", "sign out", "save draft", "log out"]
+        # "review" advances toward submit; keep it ahead of generic "next".
+        forward = ["review your application", "review", "next", "continue",
+                   "save and continue", "proceed", "start application"]
+        submit = ["submit application", "submit", "send application", "finish"]
+        # Never click destructive / dismissive buttons.
+        # (Do NOT put bare "save" here — it would eat "save and continue".)
+        avoid = ["cancel", "back", "previous", "sign out", "save draft", "log out",
+                 "dismiss", "discard", "not now", "no thanks", "delete",
+                 "remove", "withdraw", "report"]
         lowered = [(b, b.lower()) for b in buttons if not any(a in b.lower() for a in avoid)]
         for kw in forward:
             for orig, low in lowered:
@@ -1265,6 +1271,37 @@ class ApplicationFlow:
                 return "next", b
             except Exception:
                 continue
+
+        # Class-based lookup found nothing (LinkedIn obfuscates classes). Fall
+        # back to classifying the modal's buttons BY TEXT — the reliable signal.
+        try:
+            all_btns = root.locator("button")
+            m = await all_btns.count()
+        except Exception:
+            return None, None
+        avoid = ("cancel", "back", "previous", "dismiss", "discard", "close",
+                 "not now", "sign out", "log out", "save draft", "withdraw")
+        submit_kw = ("submit application", "submit", "send application", "finish")
+        forward_kw = ("review your application", "review", "next", "continue",
+                      "save and continue", "proceed")
+        found_next = None
+        for i in range(min(m, 25)):
+            b = all_btns.nth(i)
+            try:
+                if not await b.is_visible():
+                    continue
+                label = ((await b.get_attribute("aria-label")) or
+                         (await b.text_content()) or "").strip().lower()
+                if not label or any(a in label for a in avoid):
+                    continue
+                if any(k in label for k in submit_kw):
+                    return "submit", b            # submit wins immediately
+                if found_next is None and any(k in label for k in forward_kw):
+                    found_next = b
+            except Exception:
+                continue
+        if found_next is not None:
+            return "next", found_next
         return None, None
 
     async def _is_review_step(self) -> bool:

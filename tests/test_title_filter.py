@@ -30,3 +30,44 @@ def test_empty_blacklist_excludes_nothing():
 def test_multiple_keywords():
     assert _title_excluded("Staff Engineer", ["principal", "staff"]) == "staff"
     assert _title_excluded("VP of Engineering", ["principal", "staff"]) is None
+
+
+# ── location focus: Seattle metro OR remote ──
+
+def _listing(loc):
+    class L:
+        location = loc
+    L.location = loc
+    return L()
+
+
+def test_location_focus_keeps_seattle_and_remote():
+    from velvetoverride.main import _location_in_focus
+    from velvetoverride.utils.config import Config
+    cfg = Config(settings={"search": {"location_focus": ["seattle", "bellevue", "redmond"]}})
+    assert _location_in_focus(_listing("Seattle, WA (Hybrid)"), cfg)
+    assert _location_in_focus(_listing("United States (Remote)"), cfg)
+    assert _location_in_focus(_listing("Bellevue, WA (On-site)"), cfg)
+    assert _location_in_focus(_listing("Remote"), cfg)
+
+
+def test_location_focus_drops_out_of_area():
+    from velvetoverride.main import _location_in_focus
+    from velvetoverride.utils.config import Config
+    cfg = Config(settings={"search": {"location_focus": ["seattle", "bellevue"]}})
+    assert not _location_in_focus(_listing("Austin, TX (On-site)"), cfg)
+    assert not _location_in_focus(_listing("New York, NY (On-site)"), cfg)
+
+
+def test_no_focus_list_applies_everywhere():
+    from velvetoverride.main import _location_in_focus
+    from velvetoverride.utils.config import Config
+    cfg = Config(settings={"search": {}})
+    assert _location_in_focus(_listing("Austin, TX (On-site)"), cfg)
+
+
+def test_unknown_location_not_over_filtered():
+    from velvetoverride.main import _location_in_focus
+    from velvetoverride.utils.config import Config
+    cfg = Config(settings={"search": {"location_focus": ["seattle"]}})
+    assert _location_in_focus(_listing(""), cfg)

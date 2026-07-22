@@ -274,6 +274,13 @@ async def run_bot(
                 skipped_count += 1
                 continue
 
+            # Location focus: only apply to Seattle-metro OR remote roles.
+            if not _location_in_focus(listing, config):
+                log.info("bot.skip_out_of_area", title=listing.title,
+                         location=listing.location)
+                skipped_count += 1
+                continue
+
             log.info(
                 "bot.applying",
                 index=i + 1,
@@ -776,6 +783,25 @@ def _find_default_resume(config) -> str | None:
         if resumes:
             return str(resumes[0])
     return None
+
+
+def _location_in_focus(listing, config) -> bool:
+    """True if a listing is in the desired area (Seattle metro) OR remote.
+
+    Controlled by search.location_focus (list of city substrings). Remote is
+    always allowed. An empty/unset list disables filtering (apply everywhere).
+    LinkedIn puts the workplace type in the location, e.g. "Seattle, WA (Hybrid)"
+    or "United States (Remote)".
+    """
+    focus = [f.lower() for f in config.search.get("location_focus", []) if f]
+    if not focus:
+        return True
+    loc = (getattr(listing, "location", "") or "").lower()
+    if not loc:
+        return True  # unknown location — don't over-filter
+    if "remote" in loc:
+        return True
+    return any(city in loc for city in focus)
 
 
 def _title_excluded(title: str, blacklist: list[str]) -> str | None:

@@ -87,6 +87,16 @@ class FieldSolver:
         if config_answer is not None:
             return config_answer, "config", False
 
+        # ── Tier 3b: Employer / affiliation → "No" ──
+        # "Are you a current employee / affiliated with / related to someone at
+        # <company>?" is answered No, and an employment/affiliation checkbox
+        # option is left unchecked. Runs before the "generally Yes" default and
+        # the LLM so these never get a wrong affirmative.
+        affiliation = self._check_affiliation(field)
+        if affiliation is not None:
+            log.info("solver.affiliation_no", label=field.label[:70])
+            return affiliation, "config", False
+
         # ── Tier 4: Profile data ──
         profile_answer = self._check_profile(field)
         if profile_answer is not None:
@@ -259,6 +269,51 @@ class FieldSolver:
         extra = self._answers.get("skip_fields", []) or []
         patterns += [str(p).lower() for p in extra if str(p).strip()]
         return any(p in label for p in patterns)
+
+    # Phrases that mean "are you an employee of / affiliated with / related to
+    # someone at the hiring company?" — the applicant is not, so answer No.
+    _AFFILIATION_QUESTIONS = (
+        "are you a current employee", "are you an employee", "currently an employee",
+        "current or former employee", "are you a former employee", "former employee",
+        "are you currently employed by", "currently employed by", "employed by this",
+        "do you currently work for", "do you work for", "are you affiliated",
+        "affiliation with", "any affiliation", "do you have an affiliation",
+        "have an affiliation", "are you related to", "related to anyone",
+        "immediate family member", "family member who", "do you have a relationship with",
+        "relationship to this", "referred by a current", "referred by an employee",
+        "connected to anyone",
+    )
+    # Single-word-ish checkbox OPTIONS that assert an employment/affiliation tie.
+    _AFFILIATION_OPTIONS = (
+        "employee", "alumni", "alumnus", "associate", "contractor",
+        "affiliate", "intern at", "board member", "family member",
+    )
+
+    def _check_affiliation(self, field: FormField) -> str | None:
+        """Return "No" for employer/affiliation questions and options.
+
+        Works with the (now-detectable) hidden radio/checkbox structures: a
+        Yes/No radio gets "No" (the "No" option is selected), and an affiliation
+        checkbox option gets "No" (left unchecked). Returns None if unrelated.
+        """
+        label = (field.label or "").lower()
+        if not label or label == "unknown_field":
+            return None
+        # Don't hijack "how many employees…" (experience) or authorization
+        # questions that merely contain the word "work".
+        if any(x in label for x in ("how many", "number of employees",
+                                    "authorized to work", "eligible to work",
+                                    "right to work", "legally")):
+            return None
+        if any(p in label for p in self._AFFILIATION_QUESTIONS):
+            return "No"
+        # Checkbox options like "Company Employee" / "Company Alumni" / "Other
+        # (contractor)" — never tick these.
+        if field.field_type == FieldType.CHECKBOX and any(
+            w in label for w in self._AFFILIATION_OPTIONS
+        ):
+            return "No"
+        return None
 
     def _name_answer(self, label: str) -> str | None:
         """Resolve name fields (first/last/full/preferred) from the profile.

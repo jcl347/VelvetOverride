@@ -368,3 +368,43 @@ class TestCheckboxSafety:
         f = _make_field("unknown_field", FieldType.CHECKBOX)
         answer, _, _ = await solver.solve(f)
         assert answer == "No"
+
+
+class TestAffiliationRouting:
+    """Employer/affiliation questions -> No; must not hijack unrelated fields."""
+
+    @pytest.fixture
+    def solver(self, config):
+        return FieldSolver(config, llm=None)
+
+    @pytest.mark.asyncio
+    async def test_employee_question_answered_no(self, solver):
+        for label in ("Are you a current employee of Acme?",
+                      "Are you a former employee?",
+                      "Do you currently work for this company?"):
+            answer, source, _ = await solver.solve(_make_field(label, FieldType.RADIO,
+                                                               options=["Yes", "No"]))
+            assert answer == "No", label
+
+    @pytest.mark.asyncio
+    async def test_affiliation_checkbox_option_not_checked(self, solver):
+        for label in ("Acme Employee", "Acme Alumni", "Company Contractor"):
+            answer, _, _ = await solver.solve(_make_field(label, FieldType.CHECKBOX))
+            assert answer == "No", label
+
+    @pytest.mark.asyncio
+    async def test_does_not_hijack_experience_or_authorization(self, solver):
+        # "how many employees" is experience; must NOT become "No"
+        assert solver._check_affiliation(_make_field("How many employees did you manage?",
+                                                     FieldType.NUMERIC)) is None
+        # legally authorized to work is handled elsewhere as Yes
+        assert solver._check_affiliation(_make_field("Are you legally authorized to work in the US?",
+                                                     FieldType.RADIO)) is None
+
+    @pytest.mark.asyncio
+    async def test_affiliation_beats_generally_yes_default(self, solver):
+        # Without the rule this benign-looking yes/no would default to "Yes".
+        f = _make_field("Are you affiliated with anyone at the company?",
+                        FieldType.RADIO, options=["Yes", "No"])
+        answer, _, _ = await solver.solve(f)
+        assert answer == "No"

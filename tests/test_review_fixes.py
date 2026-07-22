@@ -236,3 +236,21 @@ def test_good_candidate_not_excluded_by_date_substring():
     f = FormField(label="What makes you a good fit for this role?",
                   field_type=FieldType.TEXTAREA, locator=None)
     assert fs._check_cover_letter(f, "JD", "MLE", "Acme") is not None
+
+
+# ── navigation button choice ──
+
+def test_heuristic_button_choice():
+    from velvetoverride.linkedin.apply import ApplicationFlow
+    h = ApplicationFlow._heuristic_next_button
+    # "save and continue" must NOT be filtered out by an avoid rule
+    assert h(["Cancel", "Save and continue"], allow_submit=False) == "Save and continue"
+    # never choose destructive/dismissive buttons
+    assert h(["Back", "Cancel", "Dismiss", "Discard"], allow_submit=True) == ""
+    # submit only when allowed
+    assert h(["Back", "Submit application"], allow_submit=True) == "Submit application"
+    assert h(["Submit application"], allow_submit=False) == ""
+    # review/forward preferred over plain next
+    assert h(["Review your application", "Next"], allow_submit=False) == "Review your application"
+    # a bare "Save"/"Follow" is not a forward action
+    assert h(["Save", "Follow"], allow_submit=False) == ""
