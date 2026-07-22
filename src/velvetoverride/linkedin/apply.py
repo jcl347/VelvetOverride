@@ -981,9 +981,14 @@ class ApplicationFlow:
 
             case FieldType.CHECKBOX:
                 should_check = str(value).lower() in ("true", "yes", "1")
-                is_checked = await field.locator.is_checked()
+                try:
+                    is_checked = await field.locator.is_checked()
+                except Exception:
+                    is_checked = False
                 if should_check != is_checked:
-                    await field.locator.click()
+                    # Click the visible label proxy — the native checkbox is
+                    # visually hidden and not directly clickable.
+                    await self._click_choice_input(field.locator)
 
             case FieldType.FILE_UPLOAD:
                 if value and Path(value).exists():
@@ -1069,6 +1074,41 @@ class ApplicationFlow:
         except Exception as e:
             log.warning("apply.dropdown_unresolved", label=field.label, value=value, error=str(e)[:80])
 
+    async def _click_choice_input(self, inp) -> bool:
+        """Select a radio/checkbox by its VISIBLE proxy.
+
+        LinkedIn hides the native <input> and renders a styled <label> as the
+        clickable element, so clicking the input itself is not actionable. Try
+        label[for=id], then a wrapping <label>, then a force click / .check().
+        Returns True if the option was toggled.
+        """
+        try:
+            iid = await inp.get_attribute("id")
+            if iid:
+                lbl = self._page.locator(f'label[for="{iid}"]')
+                if await lbl.count() > 0 and await lbl.first.is_visible():
+                    await lbl.first.click()
+                    return True
+        except Exception:
+            pass
+        try:
+            wrap = inp.locator("xpath=ancestor::label[1]")
+            if await wrap.count() > 0 and await wrap.first.is_visible():
+                await wrap.first.click()
+                return True
+        except Exception:
+            pass
+        try:
+            await inp.click(force=True, timeout=3000)
+            return True
+        except Exception:
+            pass
+        try:
+            await inp.check(force=True, timeout=3000)
+            return True
+        except Exception:
+            return False
+
     async def _select_radio_option(self, field: FormField, value: str) -> None:
         """Select a radio button option by matching the value to option labels."""
         value_lower = value.lower()
@@ -1084,23 +1124,31 @@ class ApplicationFlow:
         for i in range(await radios.count()):
             radio = radios.nth(i)
             radio_id = await radio.get_attribute("id")
+            matched = False
             if radio_id:
                 label = self._page.locator(f'label[for="{radio_id}"]')
                 if await label.count() > 0:
                     label_text = (await label.text_content() or "").strip().lower()
                     if value_lower in label_text or label_text in value_lower:
-                        await label.click()
-                        return
-
-            # Try matching by value attribute
-            radio_value = (await radio.get_attribute("value") or "").lower()
-            if value_lower in radio_value or radio_value in value_lower:
-                await radio.click()
+                        matched = True
+            if not matched:
+                # match by wrapping-label text or value attribute
+                try:
+                    wrap = radio.locator("xpath=ancestor::label[1]")
+                    wtext = (await wrap.first.text_content() or "").strip().lower() if await wrap.count() else ""
+                except Exception:
+                    wtext = ""
+                radio_value = (await radio.get_attribute("value") or "").lower()
+                if (wtext and (value_lower in wtext or wtext in value_lower)) or \
+                   (radio_value and (value_lower in radio_value or radio_value in value_lower)):
+                    matched = True
+            if matched:
+                await self._click_choice_input(radio)
                 return
 
         # Fallback: click first option if it's a yes/no and value suggests yes
         if value_lower in ("yes", "true") and await radios.count() > 0:
-            await radios.first.click()
+            await self._click_choice_input(radios.first)
 
     async def _primary_action(self):
         """Classify the Easy Apply modal's PRIMARY footer button.
