@@ -184,3 +184,16 @@ def test_usage_unknown_model_zero_cost():
     u.add("mystery-model", 1000, 1000)
     assert u.est_cost_usd == 0.0
     assert u.total_tokens == 2000
+
+
+def test_count_errors_by_stage(tmp_path):
+    """nav_assist events (AI button resolutions) are counted for the dashboard."""
+    from velvetoverride.tracking.database import TrackingDB
+    db = TrackingDB(tmp_path / "t.db"); db.connect()
+    db.log_error(stage="nav_assist", message="Resolved 'Submit' via chatgpt", error_type="dynamic_button")
+    db.log_error(stage="nav_assist", message="Resolved 'Next' via heuristic", error_type="dynamic_button")
+    db.log_error(stage="apply", message="some real error")
+    assert db.count_errors_by_stage("nav_assist") == 2
+    assert db.count_errors_by_stage("apply") == 1
+    assert db.count_errors_by_stage("nonexistent") == 0
+    db.close()

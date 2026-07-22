@@ -308,6 +308,13 @@ class TrackingDB:
     def error_count(self) -> int:
         return self.conn.execute("SELECT COUNT(*) FROM errors").fetchone()[0]
 
+    def count_errors_by_stage(self, stage: str) -> int:
+        """Count recorded events at a given stage (e.g. 'nav_assist' — the
+        AI-assisted dynamic button resolutions surfaced on the dashboard)."""
+        return self.conn.execute(
+            "SELECT COUNT(*) FROM errors WHERE stage = ?", (stage,)
+        ).fetchone()[0]
+
     # ── Application tracking ──
 
     # Statuses that count as a real, successful application (block re-apply).

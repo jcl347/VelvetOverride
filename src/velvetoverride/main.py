@@ -229,6 +229,7 @@ async def run_bot(
 
         # ── Apply to each listing ──
         app_flow = ApplicationFlow(page, config, field_solver, db)
+        app_flow._run_id = run_id  # so dynamic-nav assists are tied to this run
 
         for i, listing in enumerate(listings):
             if applied_count >= max_apps:

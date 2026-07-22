@@ -103,6 +103,7 @@ def create_app(db_path: str = "data/applications.db", resume_dir: str | Path | N
         try:
             stats = db.get_stats()
             stats["errors_total"] = db.error_count()
+            stats["nav_assists"] = db.count_errors_by_stage("nav_assist")
             stats["fit"] = db.get_fit_summary()
             return jsonify(stats)
         finally:
@@ -405,12 +406,13 @@ function renderCards(s){
     ['Failed', num(by.failed||0)],
     ['Skipped (dupes)', num(by.skipped||0)],
     ['Errors logged', num(s.errors_total)],
+    ['🤖 AI button resolutions', num(s.nav_assists||0)],
     ['Avg experience fit', f.avg_score != null ? f.avg_score : '—'],
     ['Strong fits', num(rec.apply||0)],
     ['Poor fits', num(rec.skip||0)],
   ];
   document.getElementById('cards').innerHTML = cards.map(c=>
-    `<div class="card"><div class="label">${c[0]}</div><div class="value">${c[1]}</div></div>`).join('');
+    `<div class="card"><div class="label">${esc(c[0])}</div><div class="value">${c[1]}</div></div>`).join('');
 }
 
 // needs_review means the application WAS submitted (its answers are just

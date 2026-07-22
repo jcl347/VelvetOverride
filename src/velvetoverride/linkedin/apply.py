@@ -67,6 +67,7 @@ class ApplicationFlow:
         self._config = config
         self._solver = field_solver
         self._db = db
+        self._run_id: int | None = None  # set by the orchestrator for tracking
         self._questions: list[QuestionRecord] = []
         self._screenshot_count = 0
         self._screenshot_paths: list[str] = []
@@ -283,15 +284,34 @@ class ApplicationFlow:
                         await self._scroll_and_click(btn)
                         await random_delay(1.5, 3.0)
                     else:
-                        # Truly no navigation — log the actual buttons for diagnosis
-                        labels = await self._collect_button_labels(self._page)
-                        reason = (
-                            f"No navigation available: {last_errors[0]}"
-                            if last_errors else "No Next/Submit button found"
-                        )
-                        log.warning("apply.no_navigation", step=step, reason=reason, buttons=labels[:10])
-                        await self._dismiss_modal()
-                        return self._make_record(listing, ApplicationStatus.FAILED, reason)
+                        # DYNAMIC fallback: resolve the button via ChatGPT from
+                        # the modal's actual visible labels (handles late-rendered
+                        # / renamed buttons the selectors and class-fallback miss).
+                        action, label = await self._resolve_nav_button_llm(
+                            listing, allow_submit=not dry_run)
+                        if action == "submit" and not dry_run:
+                            await random_delay(2.0, 4.0)
+                            if await self._submission_confirmed():
+                                log.info("apply.submitted", company=listing.company,
+                                         title=listing.title, via="dynamic")
+                                await self._dismiss_modal()
+                                return self._make_record(listing, ApplicationStatus.APPLIED)
+                            last_errors = await self._fix_validation_errors(fields, listing, modal) or last_errors
+                        elif action == "submit" and dry_run:
+                            await self._dismiss_modal()
+                            return self._make_record(listing, ApplicationStatus.DRY_RUN, "Dry run — not submitted")
+                        elif action == "next":
+                            await random_delay(1.5, 3.0)
+                        else:
+                            # Truly no navigation — even ChatGPT found no button.
+                            labels = await self._collect_button_labels(self._page)
+                            reason = (
+                                f"No navigation available: {last_errors[0]}"
+                                if last_errors else "No Next/Submit button found"
+                            )
+                            log.warning("apply.no_navigation", step=step, reason=reason, buttons=labels[:10])
+                            await self._dismiss_modal()
+                            return self._make_record(listing, ApplicationStatus.FAILED, reason)
 
             reason = (
                 f"Max form steps exceeded; last error: {last_errors[0]}"
@@ -1149,6 +1169,67 @@ class ApplicationFlow:
         # Fallback: click first option if it's a yes/no and value suggests yes
         if value_lower in ("yes", "true") and await radios.count() > 0:
             await self._click_choice_input(radios.first)
+
+    async def _resolve_nav_button_llm(self, listing, allow_submit: bool):
+        """Dynamic fallback for a missing Next/Submit button.
+
+        LinkedIn obfuscates its markup and sometimes renders the footer button
+        late, so the deterministic selectors (and the class-based _primary_action)
+        can miss it. Here we read the modal's actual visible button labels and
+        ask ChatGPT which one advances/submits the application, then click it —
+        resolving the button dynamically instead of giving up.
+
+        Returns (action, label): action is "submit" | "next" | "".
+        Records the assist (stage='nav_assist') so it shows on the dashboard.
+        """
+        # A late-rendering footer button is common — give it a moment first.
+        await random_delay(1.0, 2.0)
+        modal = await self._easy_apply_modal()
+        scope = modal if modal is not None else self._page
+        labels = await self._collect_button_labels(scope)
+        if not labels:
+            return "", ""
+
+        llm = getattr(self._solver, "_llm", None)
+        choice = ""
+        via = "heuristic"
+        if llm:
+            try:
+                summary = await self._page_text_summary(scope)
+                choice = llm.choose_next_action(
+                    labels, listing.title, listing.company,
+                    page_summary=summary, allow_submit=allow_submit,
+                )
+                via = "chatgpt"
+            except Exception as e:
+                log.warning("apply.llm_nav_error", error=str(e)[:100])
+        if not choice:
+            choice = self._heuristic_next_button(labels, allow_submit=allow_submit)
+            via = "heuristic"
+        if not choice:
+            return "", ""
+
+        is_submit = any(k in choice.lower()
+                        for k in ("submit", "send application", "finish"))
+        log.info("apply.dynamic_button", chosen=choice, via=via,
+                 is_submit=is_submit, buttons=labels[:8])
+        # Indicate on the dashboard that a dynamic (AI-assisted) resolution ran.
+        try:
+            self._db.log_error(
+                stage="nav_assist", error_type="dynamic_button",
+                run_id=self._run_id,
+                message=(f"Resolved the '{choice}' button via {via} "
+                         f"(no deterministic Next/Submit match); options were "
+                         f"{labels[:6]}"),
+                company=getattr(listing, "company", ""),
+                job_title=getattr(listing, "title", ""),
+                job_url=getattr(listing, "url", ""),
+            )
+        except Exception:
+            pass
+
+        await self._click_button_by_text(scope, choice)
+        return ("submit" if is_submit else "next"), choice
 
     async def _primary_action(self):
         """Classify the Easy Apply modal's PRIMARY footer button.
