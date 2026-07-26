@@ -94,14 +94,37 @@ JOB_TYPE_MAP = {
 }
 
 
+def remote_override_for(config: Config, location: str) -> list[str] | None:
+    """Work-type override for a single search location, or None.
+
+    Returns ``["remote"]`` (press LinkedIn's Remote button) when ``location``
+    is listed in ``search.remote_only_locations`` (case-insensitive), so a
+    nationwide search returns Remote-only jobs. Returns None for located
+    searches (e.g. Seattle), which then use the global ``search.remote``.
+    """
+    remote_only = {
+        str(s).strip().lower()
+        for s in config.search.get("remote_only_locations", []) or []
+        if s
+    }
+    return ["remote"] if str(location).strip().lower() in remote_only else None
+
+
 def build_search_url(config: Config, keyword: str | None = None,
-                     location: str | None = None) -> str:
+                     location: str | None = None,
+                     remote_override: list[str] | None = None) -> str:
     """Build a LinkedIn jobs search URL from config filters.
 
     If ``keyword``/``location`` are given, those single values are used;
     otherwise falls back to joining the configured lists. LinkedIn's `location`
     param is a single place — multiple locations must be searched separately
     (the scraper loops over them), never comma-joined into one param.
+
+    ``remote_override`` sets the work-type filter (``f_WT``) for THIS search
+    instead of the global ``search.remote``. The scraper passes ``["remote"]``
+    for any location listed in ``search.remote_only_locations`` so a nationwide
+    search (e.g. "United States") returns Remote-only jobs — pressing LinkedIn's
+    Remote button — rather than flooding on-site jobs from every city.
     """
     search = config.search
     query = keyword if keyword is not None else " ".join(search.get("keywords", []))
@@ -134,8 +157,9 @@ def build_search_url(config: Config, keyword: str | None = None,
     if tpr:
         params["f_TPR"] = tpr
 
-    # Remote
-    remotes = search.get("remote", [])
+    # Remote / work-type. A per-search override (e.g. Remote-only for a
+    # nationwide location) wins over the global search.remote list.
+    remotes = remote_override if remote_override is not None else search.get("remote", [])
     if remotes:
         codes = [REMOTE_MAP[r] for r in remotes if r in REMOTE_MAP]
         if codes:
@@ -173,8 +197,15 @@ async def scrape_job_listings(page: Page, config: Config, max_pages: int = 3) ->
     seen_urls: set[str] = set()
 
     for location in locations:
+        # Nationwide locations (search.remote_only_locations) press LinkedIn's
+        # Remote button so we never scrape the flood of on-site jobs from every
+        # city; located searches (Seattle) keep the global work-type filter.
+        remote_override = remote_override_for(config, location)
+        if remote_override:
+            log.info("search.remote_only", location=location)
         for keyword in keywords:
-            url = build_search_url(config, keyword=keyword, location=location)
+            url = build_search_url(config, keyword=keyword, location=location,
+                                   remote_override=remote_override)
             log.info("search.navigating", keyword=keyword, location=location, url=url)
             listings = await _scrape_one_search(page, config, url, max_pages)
             added = 0

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -12,6 +13,34 @@ if TYPE_CHECKING:
     from patchright.async_api import Locator, Page
 
 log = get_logger(__name__)
+
+
+# Class-agnostic radio-group QUESTION extractor (JS body; leaves `grp` and `q` in
+# scope). LinkedIn renders each radio question as a heading/label OUTSIDE the
+# radio group, with an empty <legend>; the group's own text is only the option
+# labels (Yes/No, Male/Female, ...). So we recover the question by walking up to
+# the smallest ancestor whose text, MINUS the option text, is non-empty — that
+# leftover is the question. Falls back to the nearest preceding sibling text.
+_RADIO_QUESTION_BODY = r"""
+  const norm = s => (s || '').replace(/\s+/g, ' ').trim();
+  const grp = e.closest('fieldset, [role="radiogroup"], [role="group"]') || e.parentElement;
+  const groupText = norm(grp.innerText);   // option labels only (Yes/No, ...)
+  let q = '';
+  let c = grp;
+  for (let i = 0; i < 7 && c; i++) {
+    const p = c.parentElement;
+    if (!p) break;
+    c = p;
+    let t = norm(c.innerText);
+    if (groupText) t = norm(t.split(groupText).join(' '));
+    if (t && t.length >= 3) { q = t; break; }   // smallest ancestor with a question
+  }
+  if (!q) {
+    let s = grp.previousElementSibling;
+    while (s) { const st = norm(s.innerText); if (st) { q = st; break; } s = s.previousElementSibling; }
+  }
+  q = q.slice(0, 200)
+"""
 
 
 @dataclass
@@ -210,6 +239,45 @@ async def _get_field_label(element: Locator, page: Page) -> str:
     except Exception:
         pass
 
+    # Strategy 6.5: checkbox descriptive text in a sibling/ancestor (not a
+    # <label>). Certification/consent checkboxes ("I certify the information is
+    # accurate", "I agree to the terms") often render the text as a sibling
+    # <span>/<p>, so strategies 1-6 miss it and it becomes "unknown_field" —
+    # which leaves a REQUIRED checkbox unticked and stalls the whole form.
+    # Climb a few ancestors and take the first with substantial visible text.
+    try:
+        el_type = (await element.get_attribute("type") or "").lower()
+    except Exception:
+        el_type = ""
+    if el_type == "checkbox":
+        try:
+            txt = await element.evaluate(
+                """e => {
+                    const norm = s => (s || '').replace(/\\s+/g, ' ').trim();
+                    // Climb ancestors, crossing shadow-DOM boundaries via the
+                    // shadow root's host — LinkedIn renders some consent
+                    // checkboxes inside a shadow root, so plain parentElement
+                    // climbing never reaches the "I Agree" / "I certify" text.
+                    let node = e;
+                    for (let i = 0; i < 6; i++) {
+                        let parent = node.parentElement;
+                        if (!parent) {
+                            const root = node.getRootNode && node.getRootNode();
+                            parent = (root && root.host) ? root.host : null;
+                        }
+                        if (!parent) break;
+                        node = parent;
+                        const t = norm(node.innerText || node.textContent || '');
+                        if (t.length >= 4 && t.length <= 400) return t;
+                    }
+                    return '';
+                }"""
+            )
+            if txt and txt.strip():
+                return txt.strip()[:200]
+        except Exception:
+            pass
+
     # Strategy 7: name attribute as last resort
     name = await element.get_attribute("name")
     if name and name.strip():
@@ -247,6 +315,19 @@ async def _get_radio_group_label(radio, page: Page) -> str:
     or the LinkedIn form-element label span); only falls back to the per-radio
     label as a last resort so the solver matches the actual question.
     """
+    # 0) PRIMARY: the question is rendered OUTSIDE the radio group (heading/label
+    # before it), with the group holding only the option labels. Recover it as
+    # (nearest ancestor text) minus (option text) — class-agnostic, so it
+    # survives LinkedIn's obfuscated markup. This is what lets the solver see a
+    # sponsorship / work-auth / EEO question instead of "radio-group-:ri:".
+    try:
+        q = (await radio.evaluate("e => {" + _RADIO_QUESTION_BODY + "; return q; }") or "").strip()
+        if q:
+            log.debug("radio.label_resolved", label=q[:80])
+            return q
+    except Exception as e:
+        log.debug("radio.label_extract_failed", error=str(e)[:80])
+
     # 1) fieldset > legend
     try:
         fieldset = radio.locator("xpath=ancestor::fieldset[1]")
@@ -347,7 +428,22 @@ async def _detect_radio_groups(root, page: Page) -> list[FormField]:
         if radio_label and groups[name].options is not None:
             groups[name].options.append(radio_label)
 
-    return list(groups.values())
+    # LinkedIn's resume PICKER is itself a radio group whose options are the
+    # names of previously-uploaded files (e.g. "SWE_Resume.docx"). It is handled
+    # by the resume-upload flow, not answered as a question — drop it so it is
+    # never sent to the field solver / LLM (which would blindly pick "Yes").
+    result: list[FormField] = []
+    for g in groups.values():
+        opts = g.options or []
+        if opts and sum(1 for o in opts if _RESUME_FILE_RE.search(o or "")) >= max(1, len(opts) // 2):
+            log.debug("fields.skip_resume_picker", options=opts[:3])
+            continue
+        result.append(g)
+    return result
+
+
+# A radio option whose text is an uploaded file name (resume picker signature).
+_RESUME_FILE_RE = re.compile(r"\.(pdf|docx?|rtf|txt)\b", re.IGNORECASE)
 
 
 async def _get_radio_option_label(radio: Locator, page: Page) -> str:

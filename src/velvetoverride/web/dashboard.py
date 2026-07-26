@@ -338,102 +338,210 @@ _PAGE = r"""
 <title>VelvetOverride — Application Tracker</title>
 <style>
   :root {
-    --bg: #0f1115; --panel: #1a1d24; --panel2: #232733; --text: #e6e8ec;
-    --muted: #98a0b3; --accent: #7c5cff; --accent2: #22c55e; --danger: #ef4444;
-    --border: #2b303b;
+    --bg: #0b0d0f; --panel: #131519; --panel2: #1a1d22; --text: #e8e4dc;
+    --muted: #8f8a7e; --accent: #d9663d; --accent-hi: #eb8560; --accent-soft: rgba(217,102,61,.13);
+    --border: #23262d; --border2: #2d313a;
+    --good: #6bbf7b; --warn: #d9a441; --bad: #d9635f;
+    --mono: "SF Mono","JetBrains Mono","Fira Code",ui-monospace,Menlo,Consolas,monospace;
+    --sans: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   }
   * { box-sizing: border-box; }
-  body { margin: 0; font-family: -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
-    background: var(--bg); color: var(--text); }
-  header { padding: 20px 28px; border-bottom: 1px solid var(--border);
-    display: flex; align-items: center; justify-content: space-between; }
-  header h1 { margin: 0; font-size: 18px; letter-spacing: .5px; }
+  html { scroll-behavior: smooth; }
+  body { margin: 0; font-family: var(--sans); background: var(--bg); color: var(--text);
+    -webkit-font-smoothing: antialiased; }
+  ::selection { background: var(--accent-soft); }
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 6px; }
+
+  /* Preloader — a brief choreographed reveal (fades out once content is ready) */
+  #preloader { position: fixed; inset: 0; z-index: 9999; background: var(--bg);
+    display: flex; align-items: center; justify-content: center;
+    transition: opacity .5s ease, visibility .5s ease; }
+  #preloader.done { opacity: 0; visibility: hidden; }
+  #preloader .pl { font-family: var(--mono); font-size: 12px; letter-spacing: .35em;
+    text-transform: uppercase; color: var(--muted); }
+  #preloader .pl b { color: var(--accent); font-weight: 600; }
+
+  header { padding: 22px 34px; border-bottom: 1px solid var(--border);
+    display: flex; align-items: baseline; justify-content: space-between; gap: 16px; }
+  header h1 { margin: 0; font-size: 17px; font-weight: 650; letter-spacing: .02em; }
   header h1 .v { color: var(--accent); }
+  header .kicker { font-family: var(--mono); font-size: 10.5px; color: var(--muted);
+    text-transform: uppercase; letter-spacing: .26em; margin-left: 12px; }
+  header .tools { display: flex; align-items: center; gap: 18px; }
+  .search { background: var(--panel); border: 1px solid var(--border2); border-radius: 8px;
+    color: var(--text); padding: 8px 13px; font-size: 13px; width: 200px; outline: none;
+    font-family: var(--sans); transition: border-color .2s ease, width .25s ease, background .2s ease; }
+  .search::placeholder { color: var(--muted); }
+  .search:focus { border-color: var(--accent); width: 250px; background: var(--panel2); }
   .muted { color: var(--muted); }
-  .wrap { padding: 24px 28px; max-width: 1200px; margin: 0 auto; }
-  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 14px; margin-bottom: 24px; }
-  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 16px; }
-  .card .label { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; }
-  .card .value { font-size: 26px; font-weight: 700; margin-top: 6px; }
-  .tabs { display: flex; gap: 8px; margin-bottom: 14px; flex-wrap: wrap; }
-  .tab { padding: 8px 16px; background: var(--panel); border: 1px solid var(--border);
-    border-radius: 8px; cursor: pointer; font-size: 14px; }
-  .tab.active { background: var(--accent); border-color: var(--accent); }
-  table { width: 100%; border-collapse: collapse; background: var(--panel); border-radius: 12px; overflow: hidden; }
-  th, td { text-align: left; padding: 10px 12px; font-size: 13px; border-bottom: 1px solid var(--border); }
-  th { color: var(--muted); text-transform: uppercase; font-size: 11px; letter-spacing: .5px; }
-  tr:hover td { background: var(--panel2); }
-  a { color: var(--accent); text-decoration: none; }
-  .pill { padding: 2px 9px; border-radius: 999px; font-size: 11px; font-weight: 600; display: inline-block; }
-  .s-applied { background: #14331f; color: #4ade80; }
-  .s-dry_run { background: #2a2140; color: #c4b5fd; }
-  .s-needs_review { background: #3a2e12; color: #fbbf24; }
-  .s-failed { background: #3a1717; color: #f87171; }
-  .s-skipped { background: #23272f; color: #98a0b3; }
-  .fit-good { color: #4ade80; font-weight: 700; }
-  .fit-mid  { color: #fbbf24; font-weight: 700; }
-  .fit-bad  { color: #f87171; font-weight: 700; }
-  .fit-legend { background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
-    padding: 10px 14px; margin-bottom: 12px; font-size: 13px; }
-  .bar-wrap { display: inline-block; width: 70px; height: 6px; background: var(--panel2);
+  .wrap { padding: 32px 34px 64px; max-width: 1240px; margin: 0 auto; }
+
+  /* Editorial stat blocks — hairline grid, numbered, count-up values */
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(148px, 1fr)); gap: 1px;
+    background: var(--border); border: 1px solid var(--border); border-radius: 14px;
+    overflow: hidden; margin-bottom: 36px; }
+  .card { position: relative; background: var(--panel); padding: 18px 18px 18px 20px;
+    transition: background .25s ease; }
+  .card:hover { background: var(--panel2); }
+  /* A semantic rail marks the metrics that matter (accent = headline, green/amber/
+     red = outcomes); it extends on hover. Neutral tiles get none. */
+  .card.tone::before { content: ""; position: absolute; left: 0; top: 16px; bottom: 16px; width: 2px;
+    border-radius: 2px; opacity: .85;
+    transition: top .3s cubic-bezier(.22,1,.36,1), bottom .3s cubic-bezier(.22,1,.36,1), opacity .25s ease; }
+  .card.tone:hover::before { top: 10px; bottom: 10px; opacity: 1; }
+  .card.tone-accent::before { background: var(--accent); }
+  .card.tone-good::before   { background: var(--good); }
+  .card.tone-bad::before    { background: var(--bad); }
+  .card.tone-warn::before   { background: var(--warn); }
+  .card .label { font-family: var(--mono); font-size: 10px; color: var(--muted);
+    text-transform: uppercase; letter-spacing: .14em; display: block; }
+  .card .value { font-size: 30px; font-weight: 680; margin-top: 12px;
+    font-variant-numeric: tabular-nums; letter-spacing: -.01em;
+    transition: transform .25s cubic-bezier(.22,1,.36,1); }
+  .card:hover .value { transform: translateX(3px); }
+  .card .value.accent { color: var(--accent); }
+  .card .value.good   { color: var(--good); }
+  .card .value.bad    { color: var(--bad); }
+  .card .value.warn   { color: var(--warn); }
+
+  /* Nav — Swiss-magazine numbered tabs with an accent underline */
+  .tabs { display: flex; gap: 2px; margin-bottom: 24px; flex-wrap: wrap; border-bottom: 1px solid var(--border); }
+  .tab { padding: 11px 15px 13px; cursor: pointer; font-size: 13.5px; color: var(--muted);
+    border-bottom: 2px solid transparent; margin-bottom: -1px;
+    display: flex; align-items: baseline; gap: 8px; transition: color .2s ease, border-color .2s ease; }
+  .tab .n { font-family: var(--mono); font-size: 10px; color: var(--border2); transition: color .2s ease; }
+  .tab:hover { color: var(--text); }
+  .tab:hover .n { color: var(--muted); }
+  .tab.active { color: var(--text); border-color: var(--accent); }
+  .tab.active .n { color: var(--accent); }
+
+  .panel-in { animation: fade .35s ease; }
+  @keyframes fade { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+
+  table { width: 100%; border-collapse: collapse; background: var(--panel);
+    border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+  th, td { text-align: left; padding: 11px 14px; font-size: 13px; border-bottom: 1px solid var(--border); }
+  th { font-family: var(--mono); color: var(--muted); text-transform: uppercase; font-size: 10.5px;
+    letter-spacing: .11em; font-weight: 500; background: var(--panel2); }
+  tbody tr { transition: background .15s ease; }
+  tbody tr:last-child td { border-bottom: none; }
+  tr:hover td { background: var(--accent-soft); }
+  a { color: var(--accent); text-decoration: none; transition: color .15s ease; }
+  a:hover { color: var(--accent-hi); }
+  .pill { padding: 2px 10px; border-radius: 999px; font-size: 11px; font-weight: 600; display: inline-block; }
+  .s-applied { background: rgba(107,191,123,.14); color: var(--good); }
+  .s-dry_run { background: var(--accent-soft); color: var(--accent); }
+  .s-needs_review { background: rgba(217,164,65,.14); color: var(--warn); }
+  .s-failed { background: rgba(217,99,95,.14); color: var(--bad); }
+  .s-skipped { background: var(--panel2); color: var(--muted); }
+  .fit-good { color: var(--good); font-weight: 700; }
+  .fit-mid  { color: var(--warn); font-weight: 700; }
+  .fit-bad  { color: var(--bad); font-weight: 700; }
+  .fit-legend { background: var(--panel); border: 1px solid var(--border); border-left: 2px solid var(--accent);
+    border-radius: 10px; padding: 12px 16px; margin-bottom: 14px; font-size: 13px; }
+  .bar-wrap { display: inline-block; width: 70px; height: 5px; background: var(--panel2);
     border-radius: 3px; overflow: hidden; vertical-align: middle; }
   .bar { height: 100%; border-radius: 3px; }
-  .bar-num { font-weight: 700; margin-left: 7px; font-size: 12px; }
+  .bar-num { font-weight: 700; margin-left: 8px; font-size: 12px; font-variant-numeric: tabular-nums; }
   .score-cell { white-space: nowrap; }
-  .gaps { color: #cbd5e1; font-size: 12px; max-width: 260px; }
+  .gaps { color: #c9c4b8; font-size: 12px; max-width: 260px; }
   .reason { color: var(--muted); font-size: 12px; max-width: 300px; }
-  .field-cell { color: #cbd5e1; font-size: 12.5px; max-width: 260px; }
+  .field-cell { color: #c9c4b8; font-size: 12.5px; max-width: 260px; }
   .prob-cell { max-width: 240px; }
-  .flagged-row td { background: rgba(255,107,107,0.07); }
-  .prob-flag { display: inline-block; background: rgba(255,107,107,0.16); color: #ff8b8b;
-    border: 1px solid rgba(255,107,107,0.35); border-radius: 6px; padding: 2px 7px; font-size: 12px; }
-  .src-pill { display: inline-block; background: var(--panel2); border: 1px solid var(--border);
-    border-radius: 6px; padding: 1px 7px; font-size: 11.5px; color: var(--muted); }
+  .flagged-row td { background: rgba(217,99,95,0.07); }
+  .prob-flag { display: inline-block; background: rgba(217,99,95,0.16); color: #e79088;
+    border: 1px solid rgba(217,99,95,0.35); border-radius: 6px; padding: 2px 7px; font-size: 12px; }
+  .src-pill { display: inline-block; background: var(--panel2); border: 1px solid var(--border2);
+    border-radius: 6px; padding: 1px 8px; font-size: 11.5px; color: var(--muted); font-family: var(--mono); }
   .letters-wrap { display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 14px; }
   .letter-card { position: relative; background: var(--panel); border: 1px solid var(--border);
-    border-radius: 12px; padding: 14px 16px; }
-  .letter-head { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; margin-bottom: 8px; }
+    border-radius: 12px; padding: 15px 17px; overflow: hidden;
+    transition: transform .3s cubic-bezier(.22,1,.36,1), border-color .3s ease, box-shadow .3s ease; }
+  /* Strong, professional hover on a question response: lift, accent edge, glow,
+     and an accent rail that sweeps in from the left. */
+  .letter-card::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 2px;
+    background: var(--accent); transform: scaleY(0); transform-origin: top;
+    transition: transform .35s cubic-bezier(.22,1,.36,1); }
+  .letter-card:hover { transform: translateY(-4px); border-color: var(--accent);
+    box-shadow: 0 16px 40px rgba(217,102,61,.15), 0 3px 12px rgba(0,0,0,.35); }
+  .letter-card:hover::before { transform: scaleY(1); }
+  .letter-card:hover .letter-text { border-color: var(--border2); }
+  .letter-card:hover .copy-btn { color: var(--accent); border-color: var(--accent); }
+  .letter-head { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; margin-bottom: 10px; }
   .letter-co { font-weight: 700; font-size: 14px; }
-  .letter-meta { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; flex-shrink: 0; }
-  .letter-field { font-size: 11.5px; color: var(--accent); max-width: 160px; text-align: right; }
-  .letter-text { white-space: pre-wrap; font-size: 13px; line-height: 1.5; color: #dbe4ee;
-    max-height: 160px; overflow-y: auto; padding: 8px 10px; background: var(--panel2);
+  .letter-meta { display: flex; flex-direction: column; align-items: flex-end; gap: 5px; flex-shrink: 0; }
+  .letter-field { font-size: 11.5px; color: var(--accent); max-width: 160px; text-align: right; font-family: var(--mono); }
+  .letter-text { white-space: pre-wrap; font-size: 13px; line-height: 1.55; color: #d8d3c8;
+    max-height: 160px; overflow-y: auto; padding: 10px 12px; background: var(--bg);
     border-radius: 8px; border: 1px solid var(--border); }
-  .copy-btn { margin-top: 8px; font-size: 12px; background: var(--panel2); color: var(--muted);
-    border: 1px solid var(--border); border-radius: 6px; padding: 3px 10px; cursor: pointer; }
-  .copy-btn:hover { color: var(--fg); border-color: var(--accent); }
+  .copy-btn { margin-top: 10px; font-size: 12px; background: transparent; color: var(--muted);
+    border: 1px solid var(--border2); border-radius: 6px; padding: 4px 12px; cursor: pointer;
+    font-family: var(--mono); transition: all .18s ease; }
+  .copy-btn:hover { color: var(--accent); border-color: var(--accent); }
   .hidden { display: none; }
-  .refresh { font-size: 12px; color: var(--muted); cursor: pointer; }
-  .empty { padding: 30px; text-align: center; color: var(--muted); }
+  .refresh { font-family: var(--mono); font-size: 11px; color: var(--muted); cursor: pointer;
+    letter-spacing: .04em; transition: color .2s ease; }
+  .refresh:hover { color: var(--accent); }
+  .empty { padding: 46px 30px; text-align: center; color: var(--muted); background: var(--panel);
+    border: 1px dashed var(--border2); border-radius: 12px; font-size: 13.5px; }
   .cfg-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 14px; }
-  .cfg-sec { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; }
-  .cfg-h { font-size: 12px; text-transform: uppercase; letter-spacing: .5px; color: var(--accent); margin-bottom: 8px; font-weight: 700; }
-  .cfg-t { background: transparent; }
-  .cfg-t td { border-bottom: 1px solid var(--border); padding: 6px 4px; vertical-align: top; }
+  .cfg-sec { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 15px 17px; }
+  .cfg-h { font-family: var(--mono); font-size: 10.5px; text-transform: uppercase; letter-spacing: .14em;
+    color: var(--accent); margin-bottom: 10px; font-weight: 600; }
+  .cfg-t { background: transparent; border: none; }
+  .cfg-t td { border-bottom: 1px solid var(--border); padding: 7px 4px; vertical-align: top; }
+  .cfg-t tr:hover td { background: transparent; }
   .cfg-k { color: var(--muted); width: 45%; font-size: 12.5px; }
   .cfg-v { font-size: 12.5px; }
-  .chip { display: inline-block; background: var(--panel2); border: 1px solid var(--border);
-    border-radius: 999px; padding: 2px 9px; font-size: 11.5px; margin: 1px 0; }
-  code { background: var(--panel2); padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+  .chip { display: inline-block; background: var(--panel2); border: 1px solid var(--border2);
+    border-radius: 999px; padding: 2px 10px; font-size: 11.5px; margin: 1px 0; }
+  code { background: var(--panel2); padding: 1px 6px; border-radius: 4px; font-size: 12px;
+    font-family: var(--mono); color: #d8d3c8; }
+  h3 { font-family: var(--mono); font-size: 11.5px; text-transform: uppercase; letter-spacing: .1em;
+    color: var(--muted); font-weight: 500; }
+
+  /* Cmd+K command palette */
+  #cmdk { position: fixed; inset: 0; z-index: 500; display: none; align-items: flex-start;
+    justify-content: center; background: rgba(0,0,0,.55); backdrop-filter: blur(3px); padding-top: 13vh; }
+  #cmdk.open { display: flex; animation: fade .16s ease; }
+  #cmdk .box { width: min(560px, 92vw); background: var(--panel); border: 1px solid var(--border2);
+    border-radius: 14px; overflow: hidden; box-shadow: 0 24px 64px rgba(0,0,0,.55); }
+  #cmdk input { width: 100%; border: none; background: transparent; color: var(--text);
+    padding: 16px 18px; font-size: 15px; outline: none; border-bottom: 1px solid var(--border); font-family: var(--sans); }
+  #cmdk .results { max-height: 340px; overflow-y: auto; padding: 6px; }
+  #cmdk .res { padding: 10px 12px; border-radius: 8px; cursor: pointer; display: flex;
+    align-items: baseline; gap: 11px; font-size: 13.5px; }
+  #cmdk .res .n { font-family: var(--mono); font-size: 10px; color: var(--muted); }
+  #cmdk .res.sel { background: var(--accent-soft); }
+  #cmdk .res .sub { color: var(--muted); font-size: 12px; margin-left: auto; }
+  #cmdk .hint { padding: 9px 15px; border-top: 1px solid var(--border); font-family: var(--mono);
+    font-size: 10.5px; color: var(--muted); display: flex; gap: 16px; }
+  kbd { font-family: var(--mono); background: var(--panel2); border: 1px solid var(--border2);
+    border-radius: 4px; padding: 1px 6px; font-size: 10px; }
 </style>
 </head>
 <body>
+<div id="preloader"><div class="pl"><b>Velvet</b>Override</div></div>
 <header>
-  <h1><span class="v">Velvet</span>Override <span class="muted" style="font-size:13px;">application tracker</span></h1>
-  <span class="refresh" onclick="loadAll()">↻ refresh · <span id="ts"></span></span>
+  <h1><span class="v">Velvet</span>Override<span class="kicker">application tracker</span></h1>
+  <div class="tools">
+    <input id="search" class="search" type="text" placeholder="Search companies…" autocomplete="off" spellcheck="false">
+    <span class="refresh" onclick="loadAll()">↻ sync&nbsp;·&nbsp;<span id="ts"></span>&nbsp;·&nbsp;<kbd>⌘K</kbd></span>
+  </div>
 </header>
 <div class="wrap">
-  <div id="errbanner" style="display:none;background:#3a1717;color:#f87171;border:1px solid #5b2323;border-radius:10px;padding:12px 16px;margin-bottom:16px;"></div>
+  <div id="errbanner" style="display:none;background:rgba(217,99,95,.12);color:#e79088;border:1px solid rgba(217,99,95,.3);border-radius:10px;padding:12px 16px;margin-bottom:16px;"></div>
   <div class="cards" id="cards"></div>
   <div class="tabs">
-    <div class="tab active" data-tab="apps" onclick="showTab('apps')">Applications</div>
-    <div class="tab" data-tab="fit" onclick="showTab('fit')">Experience fit</div>
-    <div class="tab" data-tab="feedback" onclick="showTab('feedback')">Field feedback</div>
-    <div class="tab" data-tab="letters" onclick="showTab('letters')">Cover letters</div>
-    <div class="tab" data-tab="resumes" onclick="showTab('resumes')">Resumes</div>
-    <div class="tab" data-tab="config" onclick="showTab('config')">Config &amp; search</div>
-    <div class="tab" data-tab="runs" onclick="showTab('runs')">Runs</div>
-    <div class="tab" data-tab="errors" onclick="showTab('errors')">Errors</div>
+    <div class="tab active" data-tab="apps" onclick="showTab('apps')"><span class="n">01</span>Applications</div>
+    <div class="tab" data-tab="letters" onclick="showTab('letters')"><span class="n">02</span>Questions</div>
+    <div class="tab" data-tab="fit" onclick="showTab('fit')"><span class="n">03</span>Experience fit</div>
+    <div class="tab" data-tab="feedback" onclick="showTab('feedback')"><span class="n">04</span>Field feedback</div>
+    <div class="tab" data-tab="resumes" onclick="showTab('resumes')"><span class="n">05</span>Résumés</div>
+    <div class="tab" data-tab="config" onclick="showTab('config')"><span class="n">06</span>Config &amp; search</div>
+    <div class="tab" data-tab="runs" onclick="showTab('runs')"><span class="n">07</span>Runs</div>
+    <div class="tab" data-tab="errors" onclick="showTab('errors')"><span class="n">08</span>Errors</div>
   </div>
   <div id="apps"></div>
   <div id="fit" class="hidden"></div>
@@ -443,7 +551,16 @@ _PAGE = r"""
   <div id="config" class="hidden"></div>
   <div id="runs" class="hidden"></div>
   <div id="errors" class="hidden"></div>
+  <footer style="margin-top:44px;padding-top:20px;border-top:1px solid var(--border);font-family:var(--mono);font-size:11px;color:var(--muted);letter-spacing:.04em;display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px;">
+    <span>VelvetOverride — automated application tracker</span>
+    <span>localhost · read-only · auto-syncs every 15s</span>
+  </footer>
 </div>
+<div id="cmdk"><div class="box">
+  <input id="cmdk-input" type="text" placeholder="Jump to a section or find a company…" autocomplete="off" spellcheck="false">
+  <div class="results" id="cmdk-results"></div>
+  <div class="hint"><span><kbd>↑</kbd> <kbd>↓</kbd> navigate</span><span><kbd>↵</kbd> open</span><span><kbd>esc</kbd> close</span></div>
+</div></div>
 <script>
 // Escape for both text AND double-quoted attribute contexts (quotes included).
 function esc(s){ return (s==null?'':String(s)).replace(/[&<>"']/g,
@@ -469,8 +586,10 @@ async function loadAll(){
     return;
   }
   banner.style.display = 'none';
+  window._apps = apps || [];
   renderCards(sum || {});
   renderApps(apps || []);
+  if (window.filterApps) filterApps();   // keep any active company filter applied
   renderFit(fit || [], (sum && sum.fit) || {});
   renderFeedback(feedback || []);
   renderLetters(letters || []);
@@ -487,19 +606,45 @@ function renderCards(s){
   const applied = (by.applied||0)+(by.dry_run||0)+(by.needs_review||0);
   const f = s.fit || {};
   const rec = f.by_recommend || {};
+  // [label, value, tone]  — tone marks the metrics that matter: accent = headline,
+  // good/warn/bad = outcomes, '' = neutral. Integer values count up.
   const cards = [
-    ['Total jobs processed', num(s.total_applications)],
-    ['Applied / submitted', num(applied)],
-    ['Failed', num(by.failed||0)],
-    ['Skipped (dupes)', num(by.skipped||0)],
-    ['Errors logged', num(s.errors_total)],
-    ['🤖 AI button resolutions', num(s.nav_assists||0)],
-    ['Avg experience fit', f.avg_score != null ? f.avg_score : '—'],
-    ['Strong fits', num(rec.apply||0)],
-    ['Poor fits', num(rec.skip||0)],
+    ['Jobs processed', s.total_applications||0, ''],
+    ['Applied / submitted', applied, 'accent'],
+    ['Failed', by.failed||0, 'bad'],
+    ['Skipped · dupes', by.skipped||0, ''],
+    ['Errors logged', s.errors_total||0, 'bad'],
+    ['AI nav resolutions', s.nav_assists||0, ''],
+    ['Avg experience fit', f.avg_score != null ? f.avg_score : null, 'accent'],
+    ['Strong fits', rec.apply||0, 'good'],
+    ['Poor fits', rec.skip||0, 'warn'],
   ];
-  document.getElementById('cards').innerHTML = cards.map(c=>
-    `<div class="card"><div class="label">${esc(c[0])}</div><div class="value">${c[1]}</div></div>`).join('');
+  document.getElementById('cards').innerHTML = cards.map((c)=>{
+    const isCount = Number.isInteger(c[1]);
+    const disp = c[1]==null ? '—' : (isCount ? '0' : esc(String(c[1])));
+    const cardCls = c[2] ? ' tone tone-'+c[2] : '';
+    const valCls = c[2] ? ' '+c[2] : '';
+    return `<div class="card${cardCls}">`
+      + `<span class="label">${esc(c[0])}</span>`
+      + `<div class="value${valCls}"${isCount?` data-count="${c[1]}"`:''}>${disp}</div></div>`;
+  }).join('');
+  animateCounts();
+}
+
+// Odometer-style count-up on first load; snaps to the value on later refreshes.
+function animateCounts(){
+  document.querySelectorAll('#cards .value[data-count]').forEach(el=>{
+    const target = parseInt(el.dataset.count, 10) || 0;
+    if (window._statsAnimated){ el.textContent = num(target); return; }
+    const dur = 850, t0 = performance.now();
+    requestAnimationFrame(function tick(now){
+      const p = Math.min(1, (now - t0) / dur);
+      const e = 1 - Math.pow(1 - p, 3);        // easeOutCubic — fast start, long settle
+      el.textContent = num(Math.round(target * e));
+      if (p < 1) requestAnimationFrame(tick); else el.textContent = num(target);
+    });
+  });
+  window._statsAnimated = true;
 }
 
 // needs_review means the application WAS submitted (its answers are just
@@ -660,11 +805,11 @@ function renderResumes(d){
 function renderLetters(rows){
   const el = document.getElementById('letters');
   if(!rows.length){
-    el.innerHTML = '<div class="empty">No cover letters yet. When a job asks for a cover letter, summary, or &ldquo;why are you interested&rdquo;, the bot writes one from your background + the JD and it is saved here to read and reuse.</div>';
+    el.innerHTML = '<div class="empty">No question responses yet. When a job asks an open-ended question &mdash; a cover letter, summary, or &ldquo;why are you interested&rdquo; &mdash; the bot writes an answer from your background + the JD and saves it here to read and reuse.</div>';
     return;
   }
-  const legend = `<div class="fit-legend"><b>${rows.length}</b> generated passages saved
-      <div class="muted" style="margin-top:4px;">Cover letters, summaries, and motivation answers the bot wrote per job. Click a card to expand; use Copy to reuse the text.</div></div>`;
+  const legend = `<div class="fit-legend"><b>${rows.length}</b> question responses saved
+      <div class="muted" style="margin-top:4px;">Answers the bot wrote to open-ended application questions (cover letters, summaries, motivation). Hover a card to focus it; use Copy to reuse the text.</div></div>`;
   const cards = rows.map((r,i)=>`<div class="letter-card">
       <div class="letter-head">
         <div>
@@ -696,7 +841,7 @@ function renderConfig(c){
   }
   const s = c.search||{}, p = c.profile||{}, ext=c.external_apply||{}, r=c.resume||{}, llm=c.llm||{}, fit=c.fit||{}, sal=c.salary||{}, bot=c.bot||{};
   const warn = p.is_placeholder
-    ? '<div style="background:#3a2e12;color:#fbbf24;border:1px solid #5b4a1a;border-radius:8px;padding:8px 12px;margin-bottom:12px;">⚠ Profile is still the placeholder — copy config/profile.yaml → config/profile.local.yaml and edit it before applying.</div>'
+    ? '<div style="background:rgba(217,164,65,.12);color:var(--warn);border:1px solid rgba(217,164,65,.3);border-radius:8px;padding:9px 13px;margin-bottom:12px;font-size:13px;">Profile is still the placeholder — copy <code>config/profile.yaml</code> → <code>config/profile.local.yaml</code> and edit it before applying.</div>'
     : '';
   const section = (title, rows) =>
     `<div class="cfg-sec"><div class="cfg-h">${esc(title)}</div><table class="cfg-t"><tbody>${rows}</tbody></table></div>`;
@@ -745,7 +890,7 @@ function renderRuns(rows){
 }
 
 function renderErrors(rows){
-  if(!rows.length){ document.getElementById('errors').innerHTML='<div class="empty">No errors recorded 🎉</div>'; return; }
+  if(!rows.length){ document.getElementById('errors').innerHTML='<div class="empty">No errors recorded.</div>'; return; }
   const body = rows.map(r=>`<tr>
     <td class="muted">${esc((r.occurred_at||'').slice(0,19).replace('T',' '))}</td>
     <td>${esc(r.stage)}</td>
@@ -759,10 +904,94 @@ function renderErrors(rows){
 
 function showTab(t){
   document.querySelectorAll('.tab').forEach(el=>el.classList.toggle('active', el.dataset.tab===t));
-  ['apps','fit','feedback','letters','resumes','config','runs','errors'].forEach(id=>document.getElementById(id).classList.toggle('hidden', id!==t));
+  ['apps','fit','feedback','letters','resumes','config','runs','errors'].forEach(id=>{
+    const el = document.getElementById(id);
+    el.classList.toggle('hidden', id!==t);
+    if (id===t){ el.classList.remove('panel-in'); void el.offsetWidth; el.classList.add('panel-in'); }
+  });
+}
+window.showTab = showTab;
+
+/* ── Cmd+K command palette: jump to a section, or find a company ───────────── */
+const CMDK_TABS = [
+  ['apps','01 · Applications'],['letters','02 · Questions'],['fit','03 · Experience fit'],
+  ['feedback','04 · Field feedback'],['resumes','05 · Résumés'],['config','06 · Config & search'],
+  ['runs','07 · Runs'],['errors','08 · Errors'],
+];
+let _cmdkItems = [], _cmdkSel = 0;
+function cmdkCompanies(){
+  const seen = new Set(), out = [];
+  for (const r of (window._apps || [])){
+    const key = (r.company||'').toLowerCase();
+    if (!r.company || seen.has(key)) continue;
+    seen.add(key);
+    out.push({label: r.company, sub: r.job_title||'', tab: 'apps'});
+  }
+  return out;
+}
+function cmdkRender(q){
+  q = (q||'').toLowerCase().trim();
+  const tabs = CMDK_TABS.map(([id,label])=>({label, sub:'section', tab:id}));
+  let items = tabs.concat(cmdkCompanies());
+  if (q) items = items.filter(it => (it.label+' '+it.sub).toLowerCase().includes(q));
+  _cmdkItems = items.slice(0, 40); _cmdkSel = 0;
+  const box = document.getElementById('cmdk-results');
+  box.innerHTML = _cmdkItems.map((it,i)=>
+    `<div class="res${i===0?' sel':''}" data-i="${i}"><span class="n">${it.sub==='section'?'§':'▸'}</span>`
+    + `<span>${esc(it.label)}</span><span class="sub">${esc(it.sub==='section'?'section':it.sub)}</span></div>`).join('')
+    || '<div class="res muted" style="cursor:default;">No matches</div>';
+  box.querySelectorAll('.res[data-i]').forEach(el=>{
+    el.onclick = ()=>{ _cmdkSel = +el.dataset.i; cmdkGo(); };
+  });
+}
+function cmdkMove(d){
+  if (!_cmdkItems.length) return;
+  _cmdkSel = (_cmdkSel + d + _cmdkItems.length) % _cmdkItems.length;
+  document.querySelectorAll('#cmdk .res[data-i]').forEach(el=>el.classList.toggle('sel', +el.dataset.i===_cmdkSel));
+  const sel = document.querySelector('#cmdk .res.sel'); if (sel) sel.scrollIntoView({block:'nearest'});
+}
+function cmdkGo(){
+  const it = _cmdkItems[_cmdkSel]; if (!it) return;
+  if (it.sub && it.sub !== 'section'){          // a company → filter the applications table
+    const s = document.getElementById('search'); s.value = it.label; window._q = it.label.toLowerCase();
+  }
+  showTab(it.tab); filterApps(); cmdkClose();
 }
 
-loadAll();
+/* Live company filter on the Applications table (survives the 15s refresh). */
+window._q = '';
+function filterApps(){
+  const q = window._q || '';
+  document.querySelectorAll('#apps tbody tr').forEach(tr=>{
+    tr.style.display = (!q || tr.textContent.toLowerCase().includes(q)) ? '' : 'none';
+  });
+}
+window.filterApps = filterApps;
+document.getElementById('search').addEventListener('input', e=>{
+  window._q = e.target.value.toLowerCase().trim();
+  showTab('apps'); filterApps();
+});
+function cmdkOpen(){
+  const m = document.getElementById('cmdk'); m.classList.add('open');
+  const inp = document.getElementById('cmdk-input'); inp.value=''; cmdkRender(''); inp.focus();
+}
+function cmdkClose(){ document.getElementById('cmdk').classList.remove('open'); }
+document.addEventListener('keydown', e=>{
+  if ((e.metaKey||e.ctrlKey) && e.key.toLowerCase()==='k'){ e.preventDefault(); cmdkOpen(); return; }
+  const open = document.getElementById('cmdk').classList.contains('open');
+  if (!open) return;
+  if (e.key==='Escape') cmdkClose();
+  else if (e.key==='ArrowDown'){ e.preventDefault(); cmdkMove(1); }
+  else if (e.key==='ArrowUp'){ e.preventDefault(); cmdkMove(-1); }
+  else if (e.key==='Enter'){ e.preventDefault(); cmdkGo(); }
+});
+document.getElementById('cmdk-input').addEventListener('input', e=>cmdkRender(e.target.value));
+document.getElementById('cmdk').addEventListener('click', e=>{ if (e.target.id==='cmdk') cmdkClose(); });
+
+loadAll().then(()=>{
+  const pl = document.getElementById('preloader');
+  if (pl) setTimeout(()=>pl.classList.add('done'), 260);
+});
 setInterval(loadAll, 15000);
 </script>
 </body>

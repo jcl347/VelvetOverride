@@ -284,6 +284,15 @@ async def run_bot(
                 skipped_count += 1
                 continue
 
+            # Skip roles that REQUIRE a security clearance the user doesn't hold
+            # (checked on the title here, and again on the full JD below). Toggle
+            # via settings.yaml search.skip_clearance_required.
+            skip_clearance = config.search.get("skip_clearance_required", True)
+            if skip_clearance and role_requires_clearance(listing.title, ""):
+                log.info("bot.skip_clearance_required", title=listing.title)
+                skipped_count += 1
+                continue
+
             # Location focus: only apply to Seattle-metro OR remote roles.
             if not _location_in_focus(listing, config):
                 log.info("bot.skip_out_of_area", title=listing.title,
@@ -346,6 +355,16 @@ async def run_bot(
             blacklist_kw = [k.lower() for k in config.search.get("blacklist_keywords", []) if k]
             if listing.description and any(k in listing.description.lower() for k in blacklist_kw):
                 log.info("bot.skip_blacklisted_keyword", title=listing.title, company=listing.company)
+                skipped_count += 1
+                continue
+
+            # Clearance-required check on the full JD (an "active/current/must
+            # have" clearance the user doesn't hold). "Ability to obtain" phrases
+            # are sponsored and NOT skipped.
+            if skip_clearance and listing.description and \
+                    role_requires_clearance(listing.title, listing.description):
+                log.info("bot.skip_clearance_required", title=listing.title,
+                         company=listing.company, stage="jd")
                 skipped_count += 1
                 continue
 
@@ -834,6 +853,47 @@ def _title_excluded(title: str, blacklist: list[str]) -> str | None:
     return None
 
 
+# Signals that a role REQUIRES a security clearance the applicant does not hold.
+# A clearance mention in the TITLE is a hard requirement; the JD needs a stronger
+# "active / current / must have" phrase. Deliberately EXCLUDES "ability to obtain"
+# / "eligible to obtain" (those are sponsored, so the applicant CAN apply).
+_CLEARANCE_TITLE_KW = (
+    "security clearance", "active clearance", "active secret", "active top secret",
+    "ts/sci", "sci clearance", "secret clearance", "top secret", "polygraph",
+    "clearance required", "must be cleared", "cleared professional",
+)
+_CLEARANCE_JD_KW = (
+    "active security clearance", "active secret clearance", "active top secret",
+    "active ts/sci", "active dod clearance", "current security clearance",
+    "current secret clearance", "must have an active", "must possess an active",
+    "must hold an active", "must maintain an active", "requires an active security",
+    "requires an active clearance", "active clearance is required",
+    "existing security clearance", "must have a current security",
+)
+# Phrases that mean a clearance is SPONSORED/obtainable — do NOT exclude these.
+_CLEARANCE_OK_KW = (
+    "ability to obtain", "able to obtain", "eligible to obtain", "willing to obtain",
+    "ability to acquire", "clearance is a plus", "clearance preferred",
+    "clearance is preferred", "or ability to obtain",
+)
+
+
+def role_requires_clearance(title: str, jd: str) -> bool:
+    """True if the role requires a clearance the applicant does not hold.
+
+    Title mentions count on their own; JD mentions must use an "active/current/
+    must have" phrase AND not be softened by an "ability to obtain"/"a plus"
+    phrase (which means the employer sponsors it, so the applicant can apply).
+    """
+    tl = (title or "").lower()
+    if any(k in tl for k in _CLEARANCE_TITLE_KW):
+        return True
+    jl = (jd or "").lower()
+    if any(k in jl for k in _CLEARANCE_JD_KW) and not any(k in jl for k in _CLEARANCE_OK_KW):
+        return True
+    return False
+
+
 def _is_browser_closed(err: Exception) -> bool:
     """True if the exception means the browser/page/context is gone.
 
@@ -1065,8 +1125,8 @@ def dashboard(ctx, host, port):
     from velvetoverride.web.dashboard import run_dashboard
 
     db_path = config.tracking.get("database_path", "data/applications.db")
-    click.echo(f"\n  VelvetOverride dashboard → http://{host}:{port}")
-    click.echo("  (reads data/applications.db · Ctrl-C to stop)\n")
+    click.echo(f"\n  VelvetOverride dashboard -> http://{host}:{port}")
+    click.echo("  (reads data/applications.db - Ctrl-C to stop)\n")
     run_dashboard(db_path=db_path, host=host, port=port)
 
 

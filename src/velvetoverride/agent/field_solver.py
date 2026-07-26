@@ -100,6 +100,20 @@ class FieldSolver:
             log.info("solver.affiliation_no", label=field.label[:70])
             return affiliation, "config", False
 
+        # ── Tier 3c: Citizenship / work-authorization status → prefer US citizen ──
+        citizenship = self._check_citizenship(field)
+        if citizenship is not None:
+            log.info("solver.citizenship", label=field.label[:60], answer=citizenship)
+            return citizenship, "config", False
+
+        # ── Tier 3d: Résumé-method choice → always "Upload resume" ──
+        # LinkedIn offers "Upload resume" vs "Tailor resume with AI"; the AI
+        # option discards our own tailored PDF, so always choose Upload.
+        resume_method = self._check_resume_method(field)
+        if resume_method is not None:
+            log.info("solver.resume_method", chose=resume_method)
+            return resume_method, "config", False
+
         # ── Tier 4: Profile data ──
         profile_answer = self._check_profile(field)
         if profile_answer is not None:
@@ -110,19 +124,35 @@ class FieldSolver:
         if location_answer is not None:
             return location_answer, "profile", False
 
+        # ── Tier 4c: Time-zone questions answered from the profile's time_zone ──
+        tz_answer = self._check_timezone(field)
+        if tz_answer is not None:
+            log.info("solver.timezone", label=field.label[:60], answer=tz_answer)
+            return tz_answer, "profile", False
+
+        # ── Tier 4d: "Today's date" / signature date → the real current date ──
+        # Deterministic so the LLM never hallucinates a stale date (it once
+        # answered "06/17/2024" on a form dated years later).
+        today_answer = self._check_current_date(field)
+        if today_answer is not None:
+            log.info("solver.current_date", label=field.label[:60], answer=today_answer)
+            return today_answer, "config", False
+
         # ── Tier 5: EEO handling ──
         eeo_answer = self._check_eeo(field)
         if eeo_answer is not None:
             return eeo_answer, "config", False
 
-        # ── Tier 5a: Consent/terms checkboxes get ticked ──
-        # Only checkboxes whose label looks like a consent/acknowledgement are
-        # auto-ticked (LinkedIn blocks the form with "Select checkbox to proceed"
-        # otherwise). Other checkboxes fall through to the LLM so we don't blindly
-        # opt into unrelated things (marketing, "I am a veteran", etc.).
-        if field.field_type == FieldType.CHECKBOX and self._is_consent_checkbox(label):
-            log.debug("solver.checkbox_consent", label=field.label[:60])
-            return "Yes", "config", False
+        # ── Tier 5a: Consent / acknowledgement / "I agree" → affirm ──
+        # A consent CHECKBOX is ticked; a consent RADIO/DROPDOWN ("Please confirm
+        # you read and understand the above" → "I Agree") picks the affirmative
+        # option (never a "Do Not Agree" one). These gates block form submission
+        # otherwise ("This field is required"). Unrelated checkboxes (marketing,
+        # "I am a veteran") are NOT auto-ticked — they fall through below.
+        consent = self._check_consent(field)
+        if consent is not None:
+            log.info("solver.consent", label=field.label[:60], answer=consent)
+            return consent, "config", False
 
         # ── Tier 5a-bis: Safety — never blindly TICK a checkbox we can't read ──
         # An unlabeled / unidentifiable checkbox must stay UNCHECKED. Left to the
@@ -134,13 +164,18 @@ class FieldSolver:
                 log.info("solver.checkbox_unlabeled_unchecked", label=field.label[:60])
                 return "No", "config", True
 
-        # ── Tier 5b: "Generally yes" default for unknown yes/no questions ──
-        # Config negatives (sponsorship, non-compete, prior employee) already
-        # matched above; anything still unresolved that is a yes/no field
-        # defaults to Yes per user preference.
-        yes_default = self._check_yes_no_default(field)
-        if yes_default is not None:
-            return yes_default, "config", True
+        # ── Tier 5b: yes/no fallback ──
+        # With an LLM configured, DEFER unmatched yes/no questions to ChatGPT
+        # (Tier 6) so we CHECK the specific question instead of blindly guessing
+        # "Yes" (which once claimed a security clearance the applicant lacked).
+        # The deterministic negatives (sponsorship, security clearance,
+        # affiliation, non-compete) already matched at the config tiers above and
+        # never reach here. Only when NO LLM is configured do we use the
+        # conservative "generally yes" heuristic so the form still completes.
+        if self._llm is None:
+            yes_default = self._check_yes_no_default(field)
+            if yes_default is not None:
+                return yes_default, "config", True
 
         # ── Tier 5c: Cover letter / summary / "why interested" ──
         # Make a compelling case from the applicant's real background + the JD.
@@ -243,8 +278,40 @@ class FieldSolver:
             years = self._resolve_experience_years(label)
             if years is not None:
                 return years
+            # No specific technology matched. If this is a GENERIC "total /
+            # overall / professional years of experience" question, answer from
+            # the real career length (EE resume timeline, ~11 yrs since Aug 2015)
+            # rather than a blind default or an LLM guess that never sees the
+            # pre-2023 history. Numeric / short-text fields ONLY — never a
+            # textarea like "Describe your work experience", and never an
+            # unknown *specific* technology (which stays an honest LLM answer).
+            total = numeric.get("total_experience_years")
+            # GENERAL experience / career-length questions get the real total.
+            # A SPECIFIC technology not in the profile does NOT — it must get a
+            # small honest number, never the career total.
+            is_general = any(m in label for m in (
+                "professional experience", "work experience", "total years",
+                "overall experience", "years of professional", "overall years",
+                "total experience", "industry experience",
+                "software engineering", "software development", "software engineer",
+                "programming", "coding experience", "development experience",
+                "in the industry", "as a software", "as an engineer",
+                "as a developer", "years of experience in software",
+            ))
+            if (
+                total is not None and is_general
+                and field.field_type in (FieldType.NUMERIC, FieldType.TEXT)
+            ):
+                return str(total)
+            # Unknown SPECIFIC technology (e.g. Kubernetes, not in the profile):
+            # answer a small, honest default rather than deferring to the LLM,
+            # which tends to echo the TOTAL career length (e.g. "11 years") for a
+            # tool the applicant barely uses. Accuracy over inflation — when
+            # unsure, a smaller number is the safer, truthful choice.
+            if field.field_type in (FieldType.NUMERIC, FieldType.TEXT):
+                return str(self._config.technology_experience.get("default", 1))
             if numeric.get("llm_for_unknown_tech", True) and self._llm:
-                return None  # → Tier 6 LLM fallback
+                return None  # → Tier 6 LLM fallback (non-numeric only)
             return str(self._config.technology_experience.get("default", 1))
 
         # Salary
@@ -254,13 +321,46 @@ class FieldSolver:
 
         # Education
         education = self._answers.get("education", {})
+        # Field of study / major -> the actual subject from the profile, NEVER
+        # the degree LEVEL. Must precede the degree matching below so a "field of
+        # study" or "major" question returns "Computer Science", not "Master's
+        # Degree" (which matches no option and stalls a required dropdown).
+        if field.field_type in (FieldType.TEXT, FieldType.DROPDOWN) and any(
+            k in label for k in (
+                "field of study", "field of degree", "area of study",
+                "course of study", "study field", "major", "discipline",
+                "concentration", "what did you study",
+            )
+        ):
+            fld = self._most_relevant_field()
+            if fld:
+                return fld
+        # A graduation-YEAR / date question must be answered from the real
+        # education dates (which match the EE resume) BEFORE the generic "degree"
+        # match below — otherwise a label containing "degree" (e.g. "year you
+        # earned your degree") wrongly returns the degree NAME into a date field.
+        # Gated to numeric/short-text fields AND a date word, so a plain
+        # "highest degree" dropdown/text still returns the degree name below.
+        if (
+            field.field_type in (FieldType.NUMERIC, FieldType.TEXT)
+            and any(w in label for w in ("year", "date", "when"))
+            and any(g in label for g in ("graduat", "degree", "completion"))
+        ):
+            grad = self._most_recent_grad_year()
+            if grad:
+                return grad
+        # "Have you completed a Bachelor's Degree?" is a Yes/No question — answer
+        # Yes/No, NOT the degree name. Checked BEFORE degree_patterns (whose bare
+        # "degree" would otherwise return "Master's Degree" into a Yes/No radio),
+        # and gated to choice fields so a name isn't typed into free text.
+        has_degree = education.get("has_degree", {})
+        if field.field_type in (FieldType.RADIO, FieldType.DROPDOWN, FieldType.CHECKBOX) \
+                and any(p.lower() in label for p in has_degree.get("patterns", [])):
+            return "Yes" if has_degree.get("answer", True) else "No"
+
+        # "What is your highest degree?" / "Education level" — the degree NAME.
         if any(p.lower() in label for p in education.get("degree_patterns", [])):
             return education.get("answer", "Bachelor's Degree")
-
-        has_degree = education.get("has_degree", {})
-        if any(p.lower() in label for p in has_degree.get("patterns", [])):
-            answer = has_degree.get("answer", True)
-            return "Yes" if answer else "No"
 
         return None
 
@@ -291,7 +391,10 @@ class FieldSolver:
         "have an affiliation", "are you related to", "related to anyone",
         "immediate family member", "family member who", "do you have a relationship with",
         "relationship to this", "referred by a current", "referred by an employee",
-        "connected to anyone",
+        "referred by a team member", "referred by a staff", "connected to anyone",
+        "ever been employed by", "ever employed by", "ever worked for",
+        "ever worked at", "previously worked for", "previously worked at",
+        "previously been employed", "current team member", "a team member of",
     )
     # Single-word-ish checkbox OPTIONS that assert an employment/affiliation tie.
     _AFFILIATION_OPTIONS = (
@@ -315,11 +418,37 @@ class FieldSolver:
                                     "authorized to work", "eligible to work",
                                     "right to work", "legally")):
             return None
-        if any(p in label for p in self._AFFILIATION_QUESTIONS):
-            return "No"
+
+        ft = field.field_type
+
+        # Conditional follow-up like "If so, which company and the dates you were
+        # employed there" — the applicant is NOT employed by / affiliated with the
+        # hiring company, so answer N/A instead of leaking real employment history
+        # (the LLM would otherwise list real employers and dates here).
+        if ft in (FieldType.TEXT, FieldType.TEXTAREA) and (
+            "if so" in label or "if yes" in label or "if applicable" in label
+        ) and any(w in label for w in (
+            "employ", "affiliat", "which company", "relationship", "related",
+            "team member",
+        )):
+            return "N/A"
+
+        choice = (FieldType.RADIO, FieldType.DROPDOWN, FieldType.CHECKBOX)
+        if ft in choice:
+            if any(p in label for p in self._AFFILIATION_QUESTIONS):
+                return "No"
+            # "current/former [Company] team member" and "referred by a current
+            # [Company] team member": the company name sits between the words, so
+            # a single contiguous pattern can't match — require "team member"
+            # (or "staff member") plus an affiliation-context word.
+            if any(t in label for t in ("team member", "staff member")) and any(
+                c in label for c in ("current", "former", "referred", "employee", "staff")
+            ):
+                return "No"
+
         # Checkbox options like "Company Employee" / "Company Alumni" / "Other
         # (contractor)" — never tick these.
-        if field.field_type == FieldType.CHECKBOX and any(
+        if ft == FieldType.CHECKBOX and any(
             w in label for w in self._AFFILIATION_OPTIONS
         ):
             return "No"
@@ -501,6 +630,154 @@ class FieldSolver:
                 out.append(pl)
         return out or ["remote"]
 
+    # Time-zone aliases so "PST/PDT/PT" all match "pacific", etc.
+    _TZ_ALIASES = {
+        "pacific": ("pacific", "pst", "pdt", "pacific time", "us/pacific", "west coast"),
+        "mountain": ("mountain", "mst", "mdt", "mountain time"),
+        "central": ("central", "cst", "cdt", "central time"),
+        "eastern": ("eastern", "est", "edt", "eastern time", "east coast"),
+    }
+
+    def _check_timezone(self, field: FormField) -> str | None:
+        """Answer a time-zone yes/no question from the profile's `time_zone`.
+
+        "Are you in the Eastern or Central time zone?" -> Yes only if the user's
+        OWN zone is named, otherwise No. Choice fields only.
+        """
+        if field.field_type not in (FieldType.RADIO, FieldType.DROPDOWN):
+            return None
+        label = (field.label or "").lower()
+        if not any(k in label for k in ("time zone", "timezone", "time-zone")):
+            return None
+        tz = str(self._config.personal.get("time_zone", "")).strip().lower()
+        if not tz:
+            return None
+        aliases = self._TZ_ALIASES.get(tz, (tz,))
+        return "Yes" if any(a in label for a in aliases) else "No"
+
+    # Option phrasings that indicate US citizenship in a status field.
+    _US_CITIZEN_OPT_KW = (
+        "u.s. citizen", "us citizen", "u.s citizen", "united states citizen",
+        "american citizen", "citizen of the united states", "u.s. citizenship",
+    )
+
+    def _is_us_citizen(self) -> bool:
+        p = self._config.personal
+        cz = str(p.get("citizenship", "")).lower()
+        wa = str(p.get("work_authorization", "")).lower()
+        return (any(k in cz for k in ("united states", "u.s", "usa", "american"))
+                or "us citizen" in wa or "u.s. citizen" in wa)
+
+    def _check_resume_method(self, field: FormField) -> str | None:
+        """Résumé-method choice ("Upload resume" vs "Tailor resume with AI") →
+        pick the Upload option so OUR tailored PDF is used, not LinkedIn's AI
+        re-tailoring (which discards it). Returns the upload option or None.
+        """
+        if field.field_type not in (FieldType.RADIO, FieldType.DROPDOWN):
+            return None
+        opts = field.options or []
+        upload_opt = next(
+            (o for o in opts if o and "upload" in o.lower() and "resume" in o.lower()),
+            None,
+        )
+        # Only act when this really is the method choice (an "AI tailor" sibling
+        # option, or a small option set), so we don't hijack unrelated radios.
+        has_ai_sibling = any(
+            o and ("tailor" in o.lower() or "with ai" in o.lower()) for o in opts
+        )
+        if upload_opt and (has_ai_sibling or len(opts) <= 3):
+            return upload_opt
+        # Fallback: option list wasn't captured, but the LABEL itself carries both
+        # choices concatenated ("Upload resume Tailor resume with AI"). Still pick
+        # Upload so we never let LinkedIn re-tailor over our own PDF.
+        label = (field.label or "").lower()
+        if "upload resume" in label and ("tailor" in label or "with ai" in label):
+            return "Upload resume"
+        return None
+
+    def _check_citizenship(self, field: FormField) -> str | None:
+        """Citizenship / work-authorization / visa STATUS questions -> prefer
+        "US Citizen". Only fires when the profile says the applicant is a US
+        citizen. Choice fields pick the US-citizen option (or, failing that, a
+        "does not require sponsorship / not applicable" option, never a visa
+        type); a bare "are you a citizen?" yes/no -> Yes; a citizenship text
+        field -> "U.S. Citizen".
+        """
+        if not self._is_us_citizen():
+            return None
+        label = (field.label or "").lower()
+        status_kw = (
+            "citizenship", "citizen", "work authorization", "work authorisation",
+            "employment authorization", "authorization status", "immigration status",
+            "visa status", "residency status", "legal status", "work eligibility",
+        )
+        if not any(k in label for k in status_kw):
+            return None
+        ft = field.field_type
+        if ft in (FieldType.RADIO, FieldType.DROPDOWN):
+            opts = field.options or []
+            # 1) An explicit "US Citizen" option wins.
+            for o in opts:
+                if any(k in (o or "").lower() for k in self._US_CITIZEN_OPT_KW):
+                    return o
+            # 2) A bare "are you a citizen?" yes/no -> Yes.
+            yesno = {op.strip().lower() for op in opts if op}
+            if yesno and yesno <= {"yes", "no", "maybe", ""} and "citizen" in label:
+                return "Yes"
+            # 3) Visa-status dropdown with no citizen option -> the "authorized /
+            #    no sponsorship / not applicable" option, never a visa type.
+            for o in opts:
+                ol = (o or "").lower()
+                if any(k in ol for k in (
+                    "does not require", "do not require sponsorship", "no sponsorship",
+                    "not require sponsorship", "authorized to work", "no visa required",
+                    "not applicable", "n/a", "none",
+                )):
+                    return o
+            return None
+        if ft == FieldType.TEXT and "citizen" in label:
+            return "U.S. Citizen"
+        return None
+
+    # Date questions that mean "the date you are filling this out" (i.e. today),
+    # as opposed to a birth/start/graduation/availability date, which must NOT
+    # be answered with today's date.
+    _TODAY_KW = (
+        "today's date", "todays date", "today date", "current date",
+        "date signed", "signature date", "date of signature", "date of signing",
+        "date completed", "date of completion", "date of application",
+        "application date", "date of submission", "date submitted",
+        "date of this application", "date certified", "certification date",
+        "date acknowledged",
+    )
+    _NOT_TODAY_KW = (
+        "birth", "start", "available", "availab", "graduat", "notice",
+        "expir", "hire", "end date", "when did", "when will", "of last",
+        "of birth", "from", "employment date", "termination", "resign",
+        "issue date", "issued", "expected", "anticipated", "onboard",
+    )
+
+    def _check_current_date(self, field: FormField) -> str | None:
+        """A "today's date" / signature-date field → the real current date
+        (MM/DD/YYYY). Deterministic so the LLM never fills a stale/wrong date."""
+        if field.field_type not in (FieldType.TEXT, FieldType.NUMERIC):
+            return None
+        label = (field.label or "").lower().strip()
+        if not label:
+            return None
+        # Never treat a birth/start/graduation/availability date as "today".
+        if any(k in label for k in self._NOT_TODAY_KW):
+            return None
+        stripped = label.replace("*", "").strip()
+        is_today = (
+            any(k in label for k in self._TODAY_KW)
+            # A bare "date" label on a form (next to a name/signature) means today.
+            or stripped in ("date", "date:", "date of today", "today")
+        )
+        if not is_today:
+            return None
+        return datetime.now().strftime("%m/%d/%Y")
+
     def _check_location_preference(self, field: FormField) -> str | None:
         """Answer location / work-arrangement questions from the user's config."""
         label = field.label.lower()
@@ -535,6 +812,49 @@ class FieldSolver:
             "processing of my", "accept",
         )
         return any(k in low for k in consent_kw)
+
+    # First-person affirmative markers that identify a consent/acknowledgement
+    # CHOICE (radio/dropdown), and the negatives we must never select.
+    _CONSENT_AFFIRM = (
+        "i agree", "i accept", "i consent", "i acknowledge", "i confirm",
+        "i understand", "i have read", "i certify", "yes, i",
+    )
+    _CONSENT_NEG = (
+        "do not", "don't", "dont", "disagree", "decline", "not agree",
+        "i do not", "i don't", "opt out", "opt-out",
+    )
+
+    def _check_consent(self, field: FormField) -> str | None:
+        """Answer a consent / acknowledgement / "I agree" gate.
+
+        CHECKBOX → "Yes" (tick). RADIO/DROPDOWN → the affirmative option
+        ("I Agree"/"I Accept"), never a "Do Not Agree"/"Decline" option. Fires
+        when the LABEL reads like a consent prompt, or (for choice fields) when
+        the OPTION set is a first-person agreement ("I Agree"/"I Do Not Agree").
+        """
+        ft = field.field_type
+        label = (field.label or "").lower()
+        opts = field.options or []
+        opts_l = [(o or "").lower() for o in opts]
+        is_consent_q = self._is_consent_checkbox(label)
+        options_are_consent = ft in (FieldType.RADIO, FieldType.DROPDOWN) and any(
+            any(m in ol for m in self._CONSENT_AFFIRM) for ol in opts_l
+        )
+        if not (is_consent_q or options_are_consent):
+            return None
+        if ft == FieldType.CHECKBOX:
+            return "Yes"
+        if ft in (FieldType.RADIO, FieldType.DROPDOWN):
+            # Pick the affirmative option, skipping any negation/decline option.
+            for o in opts:
+                ol = (o or "").lower()
+                if any(n in ol for n in self._CONSENT_NEG):
+                    continue
+                if any(m in ol for m in self._CONSENT_AFFIRM) or \
+                        ol.strip() in ("agree", "accept", "yes"):
+                    return o
+            return None
+        return None
 
     def _check_eeo(self, field: FormField) -> str | None:
         """Handle EEO / voluntary self-identification questions."""
@@ -599,6 +919,30 @@ class FieldSolver:
         log.info("solver.years_unknown_tech", label=label[:80])
         return None
 
+    def _most_recent_grad_year(self) -> str | None:
+        """Most recent education graduation YEAR from the profile.
+
+        The profile education dates match Jordan_Limperis_EE.pdf, so a
+        "what year did you graduate?" form field is answered from the real
+        record. Returns the latest 4-digit year (e.g. "2022"), or None.
+        """
+        years: list[str] = []
+        for edu in self._config.profile.get("education", []) or []:
+            m = re.match(r"\s*(\d{4})", str(edu.get("graduation_date", "")))
+            if m:
+                years.append(m.group(1))
+        return max(years) if years else None
+
+    def _most_relevant_field(self) -> str | None:
+        """The field of study / major from the profile's first (most recent)
+        education entry — e.g. 'Computer Science'. Answers 'field of study' /
+        'major' form fields with the real subject, never the degree level."""
+        for edu in self._config.profile.get("education", []) or []:
+            f = str(edu.get("field", "")).strip()
+            if f:
+                return f
+        return None
+
     def _ask_llm(
         self,
         field: FormField,
@@ -630,10 +974,19 @@ class FieldSolver:
         personal = self._config.personal
         profile = self._config.profile
 
+        loc = personal.get("city", "")
+        if personal.get("state"):
+            loc = f"{loc}, {personal.get('state')}".strip(", ")
+        if personal.get("time_zone"):
+            loc = f"{loc} ({personal.get('time_zone')} Time Zone)"
         parts = [
             f"Name: {personal.get('first_name', '')} {personal.get('last_name', '')}",
-            f"Location: {personal.get('city', '')}",
+            f"Location: {loc}",
         ]
+        if personal.get("work_authorization"):
+            parts.append(f"Work authorization: {personal.get('work_authorization')}")
+        elif personal.get("citizenship"):
+            parts.append(f"Citizenship: {personal.get('citizenship')}")
 
         summary = profile.get("summary", "")
         if summary:

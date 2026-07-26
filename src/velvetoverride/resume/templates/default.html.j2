@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <title>{{ personal.first_name }} {{ personal.last_name }} - Resume</title>
 <style>
-  /* Tight one-page layout, rendered with xhtml2pdf (no flex/grid — uses tables). */
+  /* Tight one-page layout, rendered with xhtml2pdf (no flex/grid, uses tables). */
   @page { size: letter; margin: 0.36in 0.48in; }
   body { font-family: Helvetica, Arial, sans-serif; font-size: 8.7pt; color: #1a1a1a; line-height: 1.2; }
   h1 { font-size: 16pt; color: #1f3b57; margin: 0; }
@@ -37,6 +37,18 @@
   .edu { font-size: 8.4pt; margin-bottom: 1pt; }
   .edu b { font-size: 8.7pt; }
   .inline { font-size: 8.3pt; }
+  .agent-note {
+    font-size: 9.5pt; color: #3a4b5b; font-style: italic;
+    border-top: 1pt solid #6f8aa8; border-bottom: 1pt solid #6f8aa8;
+    padding: 5pt 9pt; margin: 5pt 0 3pt 0; text-align: center;
+    background: #eef3f8;
+  }
+  .agent-note .tag {
+    font-style: normal; font-weight: bold; color: #1f3b57;
+    text-transform: uppercase; letter-spacing: 0.7pt; font-size: 10.5pt;
+    display: block; margin-bottom: 1.5pt;
+  }
+  .agent-note a { color: #1f3b57; text-decoration: none; font-style: normal; }
 </style>
 </head>
 <body>
@@ -58,6 +70,10 @@
   </tr>
 </table>
 
+<div class="agent-note">
+  <span class="tag">AI Agent Application</span>Submitted by a self-built agentic application system: a Python and Playwright (Patchright) browser agent with a five-tier LLM-driven field solver, dynamic resume generation, and SQLite application tracking. Source: <a href="https://github.com/jcl347/VelvetOverride">github.com/jcl347/VelvetOverride</a>
+</div>
+
 {% if summary %}
 <div class="section-title">Summary</div>
 <div class="summary">{{ summary }}</div>
@@ -73,7 +89,7 @@
         <span class="job-title">{{ job.title }}</span>
         <span class="job-co"> &nbsp;|&nbsp; {{ job.company }}</span>
       </td>
-      <td class="dates" style="width: 20%;">{{ job.start_date }}{% if job.end_date %} – {{ job.end_date }}{% endif %}</td>
+      <td class="dates" style="width: 20%;">{{ job.start_date[:4] }}{% if job.end_date %} – {% if job.end_date|lower == 'present' %}Present{% else %}{{ job.end_date[:4] }}{% endif %}{% endif %}</td>
     </tr>
   </table>
   {# Show bullets for the most recent roles; render older roles compactly to fit one page #}
@@ -96,7 +112,7 @@
 {% for proj in projects %}
 <div class="project">
   <span class="proj-name">{% if proj.url %}<a href="{{ proj.url }}" class="proj-link">{{ proj.name }}</a>{% else %}{{ proj.name }}{% endif %}</span>
-  {% if proj.detail %}<span class="proj-detail"> &mdash; {{ proj.detail }}</span>{% endif %}
+  {% if proj.detail %}<span class="proj-detail"> &middot; {{ proj.detail }}</span>{% endif %}
   {% if proj.tech %}<span class="proj-tech"> ({{ proj.tech | join(', ') }})</span>{% endif %}
 </div>
 {% endfor %}
@@ -119,7 +135,7 @@
 {% for edu in education %}
 <div class="edu">
   <b>{{ edu.degree }}{% if edu.field %}, {{ edu.field }}{% endif %}</b> &nbsp;|&nbsp;
-  {{ edu.institution }}{% if edu.graduation_date %} &nbsp;({{ edu.graduation_date }}){% endif %}{% if edu.gpa %} &nbsp;· GPA {{ edu.gpa }}{% endif %}{% if edu.honors %} &nbsp;· {{ edu.honors }}{% endif %}
+  {{ edu.institution }}{% if edu.graduation_date %} &nbsp;({{ edu.graduation_date[:4] }}){% endif %}{% if edu.gpa %} &nbsp;· GPA {{ edu.gpa }}{% endif %}{% if edu.honors %} &nbsp;· {{ edu.honors }}{% endif %}
 </div>
 {% endfor %}
 {% endif %}

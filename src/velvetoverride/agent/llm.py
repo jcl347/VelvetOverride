@@ -6,7 +6,9 @@ Tracks cumulative token usage so runs can report / budget token consumption.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from velvetoverride.utils.logging import get_logger
@@ -15,6 +17,24 @@ if TYPE_CHECKING:
     from velvetoverride.utils.config import Config
 
 log = get_logger(__name__)
+
+
+# Em/en/horizontal-bar dashes are a well-known "AI tell" and the user wants none
+# in generated introductions. Swap any dash used as punctuation for a natural
+# comma so the prose reads like a real person wrote it. Applied only to
+# free-form prose (summaries, cover letters) — never to the resume date ranges.
+_DASH_RE = re.compile(r"\s*[—–―‒]\s*")
+
+
+def _humanize_prose(text: str) -> str:
+    """Strip em/en dashes from generated prose and tidy the seams."""
+    if not text:
+        return text
+    t = _DASH_RE.sub(", ", text)
+    t = re.sub(r",\s*,", ", ", t)      # collapse a double comma the swap may cause
+    t = re.sub(r"\s+([,.;:!?])", r"\1", t)  # no space before punctuation
+    t = re.sub(r"[ \t]{2,}", " ", t)   # collapse runs of spaces
+    return t.strip()
 
 
 # Approximate USD price per 1M tokens (prompt, completion) for cost estimation.
@@ -178,6 +198,15 @@ class LLMClient:
         return self._config.llm.get("field_model", default)
 
     @property
+    def qa_model(self) -> str:
+        """Model for answering novel application QUESTIONS. Correctness-critical
+        and low-volume (deterministic tiers handle the common cases), so it uses
+        a STRONGER model than field_model — which also does high-volume, cheap
+        keyword/bullet scoring where mini is fine."""
+        default = "gpt-4.1" if self._provider == "openai" else "claude-sonnet-4-6"
+        return self._config.llm.get("qa_model", default)
+
+    @property
     def resume_model(self) -> str:
         default = "gpt-4.1" if self._provider == "openai" else "claude-sonnet-4-6"
         return self._config.llm.get("resume_model", default)
@@ -205,7 +234,10 @@ class LLMClient:
             options_text = f"\nAvailable options: {', '.join(options)}"
             options_text += "\nYou MUST respond with one of the available options EXACTLY as written."
 
+        today = datetime.now().strftime("%m/%d/%Y")
         prompt = f"""You are filling out a job application form for the role of "{job_title}" at "{company}".
+
+Today's date is {today}.
 
 Question: {question}
 Field type: {field_type}{options_text}
@@ -223,11 +255,36 @@ Rules:
 - For text fields, keep answers concise and professional.
 - For EEO/demographic questions, answer "Decline to self-identify" or "Prefer not to say".
 - If the question asks about a technology, answer with years of experience.
-- Be honest. Do not fabricate experience."""
+- YEARS WITH A SPECIFIC TECHNOLOGY: if the applicant profile does not clearly
+  list experience with that specific tool/framework/platform (e.g. Kubernetes,
+  Rust, a named product), answer a SMALL honest number (0, 1, or 2) — NEVER the
+  applicant's total years of experience. Only use the full career length for
+  GENERAL questions about overall / professional / software-engineering
+  experience. When unsure, choose the smaller number.
+- Be honest. Do not fabricate experience.
+- If the question asks whether the applicant HOLDS or HAS something specific
+  (a security clearance, a certification, a license, a credential, membership,
+  or an affiliation with the hiring company) and the profile does NOT clearly
+  show it, answer "No". Never claim a clearance, certification, or credential
+  the profile does not contain.
+- If the question asks whether the applicant is or was an employee of / affiliated
+  with / referred by someone at the hiring company, answer "No".
+- TIME ZONE: the applicant's own time zone is in the profile. Answer "Yes" only if
+  the applicant's time zone is the one the question asks about; otherwise "No".
+  (e.g. a Pacific-time applicant asked "are you in the Eastern or Central time
+  zone?" answers "No".)
+- VISA / CITIZENSHIP: use the profile's work authorization. If the applicant is a
+  US citizen / authorized without sponsorship, answer "No" to "are you currently
+  on a [TN/H-1B/OPT/CPT/F-1/student] visa?" and "No" to needing sponsorship. For a
+  citizenship / work-authorization STATUS question, PREFER the "US Citizen" option
+  (or answer "U.S. Citizen"); never select a visa type the applicant is not on.
+- DATE: if the question asks for today's date / the current date / a signature
+  date, answer with today's date shown above ({today}) in MM/DD/YYYY format. Never
+  guess or use a date from memory."""
 
         max_tokens = self._config.llm.get("field_max_tokens", 300)
-        log.info("llm.field_query", question=question[:80], model=self.field_model)
-        answer = self._complete(prompt, self.field_model, max_tokens)
+        log.info("llm.field_query", question=question[:80], model=self.qa_model)
+        answer = self._complete(prompt, self.qa_model, max_tokens)
         log.info("llm.field_answer", question=question[:40], answer=answer[:60])
         return answer
 
@@ -268,13 +325,15 @@ Job description excerpt:
 
 STRICT rules:
 - Keep it to 2-3 sentences.
+- Write like a real person in plain, natural language. Do NOT use em dashes or
+  en dashes; use commas or periods instead. Avoid buzzword padding and clichés.
 - Only surface keywords that the applicant genuinely already has, based on the original summary.
 - Do NOT invent skills, tools, years of experience, titles, or metrics not in the original.
 - Do NOT change or inflate any numbers or impact claims.
 - Preserve the applicant's authentic voice and real experience.
 - Return ONLY the rewritten summary, nothing else."""
 
-        return self._complete(prompt, self.resume_model, 400)
+        return _humanize_prose(self._complete(prompt, self.resume_model, 400))
 
     def score_bullet_relevance(
         self,
@@ -599,19 +658,21 @@ For the role "{job_title}" at "{company}".
 Job description excerpt:
 {job_description[:1400]}
 
-Applicant's real background (use ONLY these facts — never invent skills,
+Applicant's real background (use ONLY these facts, and never invent skills,
 employers, metrics, titles, or credentials):
 {profile_summary}
 
 Write the applicant's answer. Requirements:
-- Directly and specifically answer THAT question — do not paste a generic
-  cover letter or answer a different question.
+- Sound like a real human wrote it in plain, natural language. Do NOT use em
+  dashes or en dashes anywhere; use commas or periods instead.
+- Directly and specifically answer THAT question. Do not paste a generic cover
+  letter or answer a different question.
 - Ground every claim in the real background above; cite concrete experience or
   achievements from it. Never fabricate.
 - Connect the applicant's actual experience to this specific role and company.
-- Be genuine and concrete — no clichés, no flattery, no buzzword padding.
+- Be genuine and concrete, with no clichés, no flattery, and no buzzword padding.
 - {length_rule}
 - Return ONLY the answer text (no preamble, no "Dear Hiring Manager" unless it
   is explicitly a cover letter)."""
 
-        return self._complete(prompt, self.field_model, 600)
+        return _humanize_prose(self._complete(prompt, self.field_model, 600))

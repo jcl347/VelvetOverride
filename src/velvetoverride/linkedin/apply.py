@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from velvetoverride.browser.stealth import random_delay
-from velvetoverride.linkedin.fields import FormField, detect_form_fields
+from velvetoverride.linkedin.fields import FormField, detect_form_fields, _get_field_label
 from velvetoverride.tracking.models import (
     ApplicationRecord,
     ApplicationStatus,
@@ -38,6 +38,103 @@ SUBMIT_SELECTOR = (
 )
 
 _RESUME_EXTS = {".pdf", ".doc", ".docx"}
+
+# Degree LEVEL -> phrasings that appear in ATS dropdown options. Ordered
+# most-specific first (doctorate before master) so "graduate" collisions don't
+# misfire. Option synonyms deliberately avoid bare "graduate" (matches
+# "undergraduate"). Used to map a degree answer like "Master's Degree" onto an
+# option worded differently, e.g. "Master of Science".
+_DEGREE_LEVELS = [
+    ("doctor", ("doctor", "phd", "ph.d", "ph. d", "doctorate", "d.phil", "dphil")),
+    ("master", ("master", "msc", "m.s", "m.sc", "m.eng", "mba", "postgraduate", "post-graduate")),
+    ("bachelor", ("bachelor", "undergraduate", "bsc", "b.s", "b.sc", "b.eng", "b.a.")),
+    ("associate", ("associate", "a.a.", "a.s.")),
+    ("high school", ("high school", "secondary school", "ged", "diploma", "a-level", "gcse")),
+]
+
+
+def _match_degree_option(value: str, options: list[str]) -> str | None:
+    """Best degree-dropdown option for a degree answer, matched on the degree
+    LEVEL keyword (options are often worded differently: "Master of Science" for
+    "Master's Degree"). Returns the option text, or None if the answer is not a
+    recognizable degree level or no option mentions that level.
+    """
+    vl = (value or "").lower()
+    level_syns: tuple[str, ...] | None = None
+    for level, syns in _DEGREE_LEVELS:
+        if level in vl or any(s in vl for s in syns):
+            level_syns = (level,) + syns
+            break
+    if not level_syns:
+        return None
+    matches = [opt for opt in options if opt and any(s in opt.lower() for s in level_syns)]
+    if not matches:
+        return None
+    # Prefer the shortest match (e.g. "Master's" over "Master's or higher, plus
+    # 5 years") so we pick the plain level, not a compound requirement.
+    return min(matches, key=len)
+
+
+_CONSENT_LABEL_KEYS = (
+    "consent", "authoriz", "i agree", "acknowledg", "certify", "terms",
+    "i confirm", "declaration", "i understand", "background check",
+)
+_AFFIRM_OPTION_WORDS = (
+    "i agree", "agree", "i consent", "consent", "i accept", "accept",
+    "acknowledge", "i certify", "certify", "confirm", "i do", "yes",
+)
+
+
+def _is_negative_option(opt: str) -> bool:
+    """True if a dropdown option expresses REFUSAL/negation of agreement."""
+    ol = (opt or "").strip().lower()
+    return ol.startswith((
+        "no", "i do not", "i don't", "i decline", "decline", "disagree",
+        "i disagree", "i refuse", "not ",
+    ))
+
+
+def _match_consent_option(value: str, options: list[str], label: str) -> str | None:
+    """For a consent / authorization / agreement dropdown answered affirmatively
+    (value "Yes"), pick the option that expresses agreement. ATS forms word these
+    "I agree" / "I acknowledge", not "Yes", so an exact match misses. Never picks
+    a refusal option, and returns None unless the field is clearly a consent
+    question answered affirmatively.
+    """
+    vl = (value or "").lower()
+    if not any(a in vl for a in ("yes", "true", "agree", "consent", "accept",
+                                 "acknowledge", "certify", "confirm")):
+        return None
+    ll = (label or "").lower()
+    if not any(k in ll for k in _CONSENT_LABEL_KEYS):
+        return None
+    affirmative = [
+        opt for opt in options
+        if opt and opt.strip() and not _is_negative_option(opt)
+        and any(a in opt.lower() for a in _AFFIRM_OPTION_WORDS)
+    ]
+    if not affirmative:
+        return None
+    return min(affirmative, key=len)
+
+
+def _match_clearance_option(value: str, options: list[str], label: str) -> str | None:
+    """A "what LEVEL of security clearance do you have?" dropdown answered "No"
+    (i.e. no clearance) must select the "None" option, not fail — the answer is a
+    level, not Yes/No. Returns the none-type option or None (never a real level).
+    """
+    if "clearance" not in (label or "").lower():
+        return None
+    if (value or "").strip().lower() not in ("no", "none", "n/a", "na", "false", ""):
+        return None
+    for opt in options:
+        ol = (opt or "").lower()
+        if any(k in ol for k in (
+            "none", "no clearance", "no active", "not applicable", "n/a",
+            "do not have", "no security clearance", "unclassified",
+        )):
+            return opt
+    return None
 
 NEXT_SELECTOR = (
     'button[aria-label*="Continue to next step"], '
@@ -160,6 +257,9 @@ class ApplicationFlow:
             last_signature = None
             stuck_count = 0
             last_errors: list[str] = []
+            self._resume_uploaded_this_app = False  # reset per application
+            self._checkbox_recovered: set[str] = set()  # steps we've tried the
+            # consent-checkbox recovery on (once each), reset per application
 
             for step in range(max_steps):
                 log.info("apply.form_step", step=step + 1, title=listing.title)
@@ -195,6 +295,12 @@ class ApplicationFlow:
                         "(refused to scan the full page)",
                     )
                 fields = await detect_form_fields(self._page, scope=modal)
+                await self._diag_dump_structures(modal)
+                # If this is a résumé step with an "Upload resume" BUTTON (no file
+                # input in the DOM until clicked), push our tailored PDF via the
+                # file chooser so it's used instead of a stored résumé.
+                if not any(f.field_type == FieldType.FILE_UPLOAD for f in fields):
+                    await self._ensure_resume_uploaded(modal)
                 await self._fill_fields(fields, listing)
                 await random_delay(0.8, 1.8)
 
@@ -209,8 +315,15 @@ class ApplicationFlow:
 
                 await random_delay(0.6, 1.2)
 
-                # Detect a form that isn't advancing (same step + same errors)
+                # Detect a form that isn't advancing. The signature includes a
+                # per-step marker (progress % + section heading) so that ADVANCING
+                # to a genuinely different step resets the stuck counter — even
+                # when several steps in a row have no fillable fields (cover-letter
+                # upload, work-experience / education cards). Without it, those
+                # empty steps all share the signature ((), (), False) and the form
+                # falsely "gives up" while it is actually progressing.
                 signature = (
+                    await self._step_marker(modal),
                     tuple(f.label for f in fields),
                     tuple(errors),
                     await self._is_review_step(),
@@ -221,6 +334,24 @@ class ApplicationFlow:
                         "apply.form_stuck", step=step + 1, attempts=stuck_count,
                         errors=errors[:2] if errors else [],
                     )
+                    # One-time recovery: a stuck step is frequently blocked by a
+                    # REQUIRED consent/acknowledgement checkbox that came through
+                    # unlabeled (e.g. rendered inside a shadow DOM, so the label
+                    # is unreadable and it stays unticked). Tick the non-marketing
+                    # checkbox(es) and retry before giving up. Only fires on an
+                    # already-stuck form, so it never touches optional opt-ins on
+                    # forms that submit fine.
+                    marker = signature[0]
+                    if marker not in self._checkbox_recovered:
+                        self._checkbox_recovered.add(marker)
+                        ticked = await self._tick_unchecked_checkboxes(modal)
+                        if ticked:
+                            log.info("apply.stuck_recovery_checkbox",
+                                     ticked=ticked[:4], step=step + 1)
+                            stuck_count = 0
+                            last_signature = None
+                            await random_delay(0.4, 1.0)
+                            continue
                     if stuck_count >= max_stuck:
                         reason = (
                             f"Stuck on form step {step + 1}: {last_errors[0]}"
@@ -367,6 +498,51 @@ class ApplicationFlow:
         except Exception:
             pass
         return None
+
+    # Marketing / promotional opt-ins we must NOT auto-tick even during recovery.
+    _MARKETING_KW = (
+        "marketing", "promotional", "promotion", "newsletter", "subscribe",
+        "receive offer", "receive updates", "receive communication",
+        "receive email", "receive text", "receive sms", "sms updates",
+        "opt in to", "opt-in to", "third part", "partner offer",
+        "share my information", "share my data", "keep me informed",
+    )
+
+    async def _tick_unchecked_checkboxes(self, modal) -> list[str]:
+        """Recovery for a stuck form: tick unchecked checkbox(es) that look like a
+        required consent/acknowledgement gate. A stuck (non-advancing) form is
+        typically blocked by one, and such gates sometimes render inside a shadow
+        DOM so their label is unreadable ("unknown_field") and they stay unticked.
+        Marketing/promotional opt-ins are skipped. Returns the labels ticked.
+        """
+        ticked: list[str] = []
+        try:
+            cbs = modal.locator('input[type="checkbox"]')
+            n = await cbs.count()
+        except Exception:
+            return ticked
+        for i in range(n):
+            cb = cbs.nth(i)
+            try:
+                if await cb.is_checked():
+                    continue
+            except Exception:
+                continue
+            label = ""
+            try:
+                label = (await _get_field_label(cb, self._page) or "").lower()
+            except Exception:
+                pass
+            if any(k in label for k in self._MARKETING_KW):
+                log.info("apply.stuck_recovery_skip_marketing", label=label[:50])
+                continue
+            try:
+                await self._click_choice_input(cb, desired=True)
+                if await cb.is_checked():
+                    ticked.append(label or "unlabeled")
+            except Exception as e:
+                log.debug("apply.stuck_recovery_tick_failed", error=str(e)[:60])
+        return ticked
 
     async def _stuck_diagnostics(self, fields, modal, listing=None) -> str:
         """Capture a stuck form step — a screenshot plus each field's
@@ -933,6 +1109,170 @@ class ApplicationFlow:
         except Exception:
             return ""
 
+    async def _ensure_resume_uploaded(self, scope) -> bool:
+        """Upload our tailored PDF via the "Upload resume" BUTTON.
+
+        Some résumé steps have no ``input[type=file]`` in the DOM — an "Upload
+        resume" button triggers a file chooser instead — so the bot would
+        otherwise submit with a stored/previous résumé. We intercept that chooser
+        with Playwright and push the tailored PDF. Once per application.
+        """
+        if getattr(self, "_resume_uploaded_this_app", False):
+            return False
+        resume_path = getattr(self, "_resume_path", None)
+        if not resume_path or not Path(resume_path).exists():
+            return False
+        if Path(resume_path).suffix.lower() not in _RESUME_EXTS:
+            return False
+        try:
+            btn = scope.locator(
+                'button:has-text("Upload resume"), label:has-text("Upload resume"), '
+                '[role="button"]:has-text("Upload resume")'
+            )
+            if await btn.count() == 0 or not await btn.first.is_visible():
+                return False
+        except Exception:
+            return False
+        try:
+            async with self._page.expect_file_chooser(timeout=6000) as fc_info:
+                await btn.first.click()
+            chooser = await fc_info.value
+            await chooser.set_files(resume_path)
+            self._resume_uploaded_this_app = True
+            await random_delay(1.5, 3.0)
+            log.info("apply.resume_uploaded", path=resume_path, via="upload_button")
+            return True
+        except Exception as e:
+            log.warning("apply.resume_upload_button_failed", error=str(e)[:120])
+            return False
+
+    async def _step_marker(self, modal) -> str:
+        """A per-step identity marker for the stuck detector: the modal's progress
+        indicator (aria-valuenow / "X/Y pages") plus its section heading. Two
+        genuinely different steps that both have no fillable fields still get
+        different markers, so advancing resets the stuck counter; a step that
+        truly repeats keeps the same marker and is still caught.
+        """
+        try:
+            return await modal.evaluate(
+                r"""el => {
+                  const norm = s => (s||'').replace(/\s+/g,' ').trim();
+                  let prog = '';
+                  const pb = el.querySelector('progress,[role=progressbar]');
+                  if (pb) prog = pb.getAttribute('aria-valuenow') || pb.value || '';
+                  if (!prog) { const m = norm(el.innerText).match(/(\d+)\s*\/\s*(\d+)\s*(pages|steps)?/i); if (m) prog = m[0]; }
+                  const h = el.querySelector('h1,h2,h3,h4,[role=heading]');
+                  const head = h ? norm(h.innerText).slice(0,60) : '';
+                  return (prog + '|' + head).slice(0, 90);
+                }"""
+            ) or ""
+        except Exception:
+            return ""
+
+    async def _diag_dump_structures(self, modal) -> None:
+        """DIAGNOSTIC (set VELVET_DIAG=1, dry-run): dump résumé-step and
+        structured-card markup so the upload / card-fill flows can be built from
+        real DOM. Also clicks ONE "Edit" (once per run) to reveal the card
+        sub-form. No-op unless the flag is set.
+        """
+        if not os.environ.get("VELVET_DIAG"):
+            return
+        page = self._page
+        try:
+            static = await page.evaluate(
+                r"""() => {
+                  const norm = s => (s||'').replace(/\s+/g,' ').trim();
+                  const dlg = document.querySelector('div[role=dialog], dialog') || document.body;
+                  const out = {buttons: [], file_inputs: [], resume_html: null, cards: []};
+                  dlg.querySelectorAll('button,[role=button],label').forEach(b => {
+                    const t = norm(b.innerText); const r = b.getBoundingClientRect();
+                    if (t && t.length < 42 && r.width > 0)
+                      out.buttons.push(t + ' <' + b.tagName + (b.getAttribute('for') ? ' for=' + b.getAttribute('for') : '') + '>');
+                  });
+                  document.querySelectorAll('input[type=file]').forEach(f =>
+                    out.file_inputs.push({id: f.id, name: f.name, accept: f.accept}));
+                  const rh = Array.from(dlg.querySelectorAll('*')).find(e =>
+                    /upload resume|be sure to include|tailor resume/i.test(norm(e.innerText))
+                    && norm(e.innerText).length < 700 && e.querySelectorAll('*').length < 70);
+                  if (rh) out.resume_html = rh.outerHTML.replace(/\s+/g,' ').slice(0, 1500);
+                  dlg.querySelectorAll('button,[role=button]').forEach(b => {
+                    if (norm(b.innerText) === 'Edit') {
+                      let card = b;
+                      for (let i = 0; i < 6 && card; i++) { card = card.parentElement;
+                        if (card && norm(card.innerText).length > 40) break; }
+                      if (card) out.cards.push(norm(card.innerText).slice(0, 240));
+                    }
+                  });
+                  out.checkboxes = [];
+                  dlg.querySelectorAll('input[type=checkbox], [role=checkbox]').forEach(cb => {
+                    const p1 = cb.parentElement, p2 = p1 && p1.parentElement;
+                    out.checkboxes.push({
+                      tag: cb.tagName, type: cb.getAttribute('type'), id: cb.id,
+                      name: cb.getAttribute('name'), aria: cb.getAttribute('aria-label'),
+                      labelledby: cb.getAttribute('aria-labelledby'),
+                      required: cb.required || cb.getAttribute('aria-required'),
+                      self: (cb.outerHTML||'').replace(/\s+/g,' ').slice(0,180),
+                      p1_text: p1 ? norm(p1.innerText).slice(0,140) : null,
+                      p2_text: p2 ? norm(p2.innerText).slice(0,180) : null,
+                      p1_html: p1 ? (p1.outerHTML||'').replace(/\s+/g,' ').slice(0,420) : null,
+                    });
+                  });
+                  out.checkboxes = out.checkboxes.slice(0, 8);
+                  out.buttons = [...new Set(out.buttons)].slice(0, 18);
+                  out.cards = out.cards.slice(0, 8);
+                  return JSON.stringify(out);
+                }"""
+            )
+            log.info("diag.static", dump=static)
+            # Click a CARD "Edit" once (not the contact-info edit) to reveal the
+            # card sub-form. Mark the right one so Playwright clicks exactly it.
+            if not getattr(self, "_diag_edited", False):
+                marked = await page.evaluate(
+                    r"""() => {
+                      const norm = s => (s||'').replace(/\s+/g,' ').trim().toLowerCase();
+                      const dlg = document.querySelector('div[role=dialog], dialog') || document.body;
+                      const kw = ['dates of employment','dates attended','discipline',
+                                  'your title','field of study','school'];
+                      const edits = [...dlg.querySelectorAll('button,[role=button]')]
+                        .filter(b => norm(b.innerText) === 'edit');
+                      for (const e of edits) {
+                        let c = e;
+                        for (let j = 0; j < 6 && c; j++) { c = c.parentElement;
+                          if (c && kw.some(k => norm(c.innerText).includes(k))) {
+                            e.setAttribute('data-diag-edit','1'); return true; } }
+                      }
+                      return false;
+                    }"""
+                )
+                if marked:
+                    self._diag_edited = True
+                    try:
+                        await modal.locator('[data-diag-edit="1"]').first.click(timeout=4000)
+                        await random_delay(1.2, 2.0)
+                        sub = await page.evaluate(
+                            r"""() => {
+                              const norm = s => (s||'').replace(/\s+/g,' ').trim();
+                              const dlg = document.querySelector('div[role=dialog], dialog') || document.body;
+                              const fields = [];
+                              dlg.querySelectorAll('input,select,textarea').forEach(el => {
+                                const r = el.getBoundingClientRect();
+                                let lbl = '';
+                                if (el.id) { const l = document.querySelector('label[for="'+el.id+'"]'); if (l) lbl = norm(l.innerText); }
+                                fields.push({tag: el.tagName, type: el.type||'', id: el.id, name: el.name,
+                                  vis: (r.width>0&&r.height>0), label: lbl.slice(0,40),
+                                  aria: el.getAttribute('aria-label'), ph: el.getAttribute('placeholder')});
+                              });
+                              const btns = []; dlg.querySelectorAll('button,[role=button]').forEach(b => {
+                                const t = norm(b.innerText); if (t && t.length < 30) btns.push(t); });
+                              return JSON.stringify({fields: fields.slice(0,22), btns: [...new Set(btns)].slice(0,14)});
+                            }"""
+                        )
+                        log.info("diag.edit_subform", dump=sub)
+                    except Exception as e:
+                        log.warning("diag.edit_click_failed", error=str(e)[:120])
+        except Exception as e:
+            log.warning("diag.structures_failed", error=str(e)[:120])
+
     async def _fill_fields(self, fields: list[FormField], listing: JobListing) -> None:
         """Fill all detected fields using the hybrid solver."""
         for field in fields:
@@ -1102,6 +1442,7 @@ class ApplicationFlow:
         # 2) Fuzzy match against the actual option texts
         try:
             options = field.locator.locator("option")
+            option_texts: list[str] = []
             best = None
             for i in range(await options.count()):
                 opt = options.nth(i)
@@ -1109,14 +1450,35 @@ class ApplicationFlow:
                 tl = text.lower()
                 if not tl:
                     continue
+                option_texts.append(text)
                 # Exact, or a substantial substring either way (len>=3 so "no"
                 # doesn't match "None", "male" doesn't match "female", etc.).
-                if value_l == tl or (len(value_l) >= 3 and value_l in tl) or \
-                   (len(tl) >= 3 and tl in value_l):
+                if best is None and (value_l == tl or (len(value_l) >= 3 and value_l in tl) or
+                                     (len(tl) >= 3 and tl in value_l)):
                     best = text
-                    break
             if best is not None:
                 await field.locator.select_option(label=best, timeout=3000)
+                return
+            # 2.5) Degree-level questions: "Master's Degree" rarely matches a
+            #      dropdown option verbatim (options say "Master of Science",
+            #      "Graduate degree", ...). Match on the shared degree KEYWORD.
+            deg = _match_degree_option(value, option_texts)
+            if deg is not None:
+                await field.locator.select_option(label=deg, timeout=3000)
+                log.info("apply.dropdown_degree_matched", label=field.label, chose=deg)
+                return
+            # 2.6) Consent/authorization dropdowns answered "Yes" whose options are
+            #      worded "I agree" / "I acknowledge" (never a refusal option).
+            con = _match_consent_option(value, option_texts, field.label)
+            if con is not None:
+                await field.locator.select_option(label=con, timeout=3000)
+                log.info("apply.dropdown_consent_matched", label=field.label[:50], chose=con)
+                return
+            # 2.7) "What LEVEL of security clearance?" answered "No" -> pick "None".
+            clr = _match_clearance_option(value, option_texts, field.label)
+            if clr is not None:
+                await field.locator.select_option(label=clr, timeout=3000)
+                log.info("apply.dropdown_clearance_matched", label=field.label[:50], chose=clr)
                 return
         except Exception:
             pass
@@ -1202,6 +1564,46 @@ class ApplicationFlow:
             if matched:
                 await self._click_choice_input(radio)
                 return
+
+        # DECLINE intent (EEO / voluntary self-identification): the desired value
+        # is a "prefer not to say" phrase that rarely matches the option text
+        # verbatim ("I prefer not to specify"). Click the option that actually
+        # declines, matched by keyword — and NEVER a real demographic. If there
+        # is no decline option, leave the group UNSELECTED (better to skip than
+        # disclose race/gender/veteran/disability the user withheld).
+        _decline_markers = (
+            "prefer not", "decline", "not to say", "not to specify",
+            "not to answer", "not to disclose", "do not wish", "don't wish",
+            "choose not", "rather not", "not specified", "self-identif",
+            "i do not want to answer", "wish not to",
+        )
+        if any(m in value_lower for m in (
+            "prefer not", "decline", "not to say", "not to specify",
+            "not to answer", "self-identif", "not to disclose", "do not wish",
+        )):
+            for i in range(await radios.count()):
+                r = radios.nth(i)
+                try:
+                    txt = ""
+                    rid = await r.get_attribute("id")
+                    if rid and '"' not in rid and "\\" not in rid:
+                        lab = self._page.locator(f'label[for="{rid}"]')
+                        if await lab.count() > 0:
+                            txt = (await lab.first.text_content() or "").strip().lower()
+                    if not txt:
+                        wrap = r.locator("xpath=ancestor::label[1]")
+                        if await wrap.count() > 0:
+                            txt = (await wrap.first.text_content() or "").strip().lower()
+                    if not txt:
+                        txt = (await r.get_attribute("value") or "").lower()
+                    if any(m in txt for m in _decline_markers):
+                        await self._click_choice_input(r)
+                        log.info("apply.eeo_declined", label=field.label[:50], chose=txt[:30])
+                        return
+                except Exception:
+                    continue
+            log.warning("apply.eeo_no_decline_option", label=field.label[:60])
+            return  # leave unselected — never select a real demographic
 
         # Fallback: if affirmative, find the option whose label actually reads
         # "yes" — never assume the FIRST radio is Yes (a group may render No

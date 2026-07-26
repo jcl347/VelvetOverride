@@ -59,6 +59,13 @@ search:
   locations:
     - "Seattle, Washington, United States"
     - "United States"
+  # Locations searched Remote-only (presses LinkedIn's Remote button / f_WT=2).
+  # Case-insensitive match against `locations` above. This scopes the nationwide
+  # "United States" search to remote roles AT THE SOURCE — so we never scrape the
+  # flood of on-site jobs from every city — while the Seattle search keeps all
+  # local work types (below). Seattle stays a real located search.
+  remote_only_locations:
+    - "United States"
   # Only apply to jobs whose location is remote OR contains one of these
   # substrings (case-insensitive). Empty list = no location filtering.
   location_focus:
@@ -112,6 +119,10 @@ search:
     - "Revature"
     - "TikTok"
     - "Jobgether"
+  # Skip roles that REQUIRE an active/current security clearance you don't hold
+  # (matched on the job title and full JD). "Ability to obtain" clearances are
+  # sponsored and are NOT skipped. Set to false if you actually hold a clearance.
+  skip_clearance_required: true
   # Minimum job match score (0-100) to proceed with application. Scoring is
   # crude keyword-overlap, so real jobs score ~10-80. Raised from 12 to filter
   # weak keyword matches; the ChatGPT fit floor (fit.min_score) is the second gate.
@@ -181,8 +192,14 @@ browser:
 # standard model for quality but is low-volume (a few calls per job).
 llm:
   provider: "openai"
-  # Model for high-volume field Q&A + keyword/bullet scoring (mini = big free bucket)
+  # Model for high-volume, low-stakes work: keyword extraction + bullet scoring
+  # (mini = big free bucket).
   field_model: "gpt-4.1-mini"
+  # Model for ANSWERING novel application questions. Correctness-critical and
+  # low-volume (deterministic rules handle the common ones), so use a stronger
+  # model here. nano is NOT recommended — it misreads reasoning questions
+  # (time zone, visa status). Options: gpt-4.1 (strong) or gpt-4.1-mini (cheaper).
+  qa_model: "gpt-4.1"
   # Model for resume summary tailoring (standard model, low call volume)
   resume_model: "gpt-4.1"
   # Max tokens for field answers (kept small — answers are short)
@@ -197,10 +214,13 @@ resume:
   #                aligned to each JD. Requires an LLM key for best results.
   #   "static"   — always upload YOUR OWN resume file (static_resume_path); no
   #                generation. Use this to bring your own polished resume.
-  mode: "static"
-  # Path to your own resume PDF/DOCX. Used directly in "static" mode, and as the
-  # fallback in "tailored" mode if generation fails. Absolute or repo-relative.
-  static_resume_path: "Jordan_Limperis_Resume_DS_rs.pdf"
+  # "tailored": generate a per-job PDF from the profile, keyword-aligned to each
+  # JD (bullet TEXT stays verbatim — only the summary is aligned and bullets
+  # re-ordered), so keywords are optimized per posting without changing core
+  # experience. Falls back to static_resume_path (your SWE_Resume) if generation
+  # fails.
+  mode: "tailored"
+  static_resume_path: "SWE_Resume.docx"
   # Template to use (filename without extension in src/velvetoverride/resume/templates/)
   template: "default"
   # Target ATS keyword coverage (0.0 - 1.0)

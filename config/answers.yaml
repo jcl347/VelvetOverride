@@ -3,6 +3,11 @@
 # The bot checks these BEFORE falling back to the LLM, saving cost.
 
 # ─── Yes/No Questions (Radio Buttons) ─────────────────────────
+# EVERY answer below is yours to set. Change `answer: true/false` for any entry
+# to control how the bot responds, and add `patterns` (case-insensitive
+# substrings of the question text) to match new phrasings. Anything NOT matched
+# here falls back to a conservative default, so add a rule for any screening
+# question you want answered deterministically.
 yes_no:
   legally_authorized:
     patterns:
@@ -19,6 +24,27 @@ yes_no:
       - "immigration sponsorship"
       - "H-1B"
       - "work visa"
+    answer: false
+
+  # Are you CURRENTLY on a work/student visa (TN, H-1B, OPT, CPT, F-1, …)? You are
+  # a US citizen and not on any visa, so this is always No. (Distinct from
+  # sponsorship above, which asks whether you'll NEED a visa.)
+  on_work_visa:
+    patterns:
+      - "on a tn visa"
+      - "tn visa"
+      - "tn status"
+      - "on a visa"
+      - "currently on a visa"
+      - "on an h-1b"
+      - "on h-1b"
+      - "on opt"
+      - "on cpt"
+      - "on f-1"
+      - "on f1"
+      - "on a student visa"
+      - "hold a visa"
+      - "holding a visa"
     answer: false
 
   drivers_license:
@@ -77,6 +103,39 @@ yes_no:
       - "previously worked"
     answer: false
 
+  # You do NOT currently hold a security clearance. Claiming one you don't have
+  # is a serious misrepresentation, so this defaults to No. Flip to `true` only
+  # if you actually hold an active clearance.
+  security_clearance:
+    patterns:
+      - "security clearance"
+      - "hold a clearance"
+      - "active clearance"
+      - "current clearance"
+      - "government clearance"
+      - "secret clearance"
+      - "top secret"
+      - "ts/sci"
+      - "clearance level"
+      - "clearance"
+    answer: false
+
+  # Screening extras — edit freely. Add patterns for anything a form asks that
+  # you want answered deterministically instead of by the LLM.
+  willing_overtime:
+    patterns:
+      - "willing to work overtime"
+      - "work overtime"
+      - "extended hours"
+    answer: true
+
+  willing_to_travel:
+    patterns:
+      - "willing to travel"
+      - "able to travel"
+      - "travel requirement"
+    answer: true
+
 # ─── EEO / Voluntary Self-Identification (Decline to answer) ──
 eeo:
   # For dropdown selects, pick the option matching these keywords
@@ -107,6 +166,12 @@ numeric:
   # technology_experience, ask the LLM (which sees your real years table) rather
   # than emitting a blind `default`. Set false to always use `default`.
   llm_for_unknown_tech: true
+  # Real total career length, in years (career start Aug 2015). Used to answer a
+  # GENERIC "total / overall / professional years of experience" question from
+  # the true timeline (matches Jordan_Limperis_EE.pdf) instead of a blind default
+  # or an LLM guess that never sees the pre-2023 history. Only applied to
+  # numeric / short-text fields, never a specific-technology or free-text field.
+  total_experience_years: 11
   experience_patterns:
     - "years of experience"
     - "how many years"
@@ -114,6 +179,12 @@ numeric:
     - "experience with"
     - "experience in"
     - "experience using"
+    # Generic "total experience" phrasings that lack the triggers above, so the
+    # solver reaches the total_experience_years answer (numeric fields only).
+    - "professional experience"
+    - "work experience"
+    - "total years"
+    - "overall experience"
 
   # Salary expectations (if asked)
   salary:
@@ -122,7 +193,7 @@ numeric:
       - "compensation"
       - "pay expectation"
       - "desired pay"
-    answer: "150000"
+    answer: "125000"
 
 # ─── Education Questions ──────────────────────────────────────
 education:
