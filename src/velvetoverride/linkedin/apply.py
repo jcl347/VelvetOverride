@@ -271,6 +271,19 @@ class ApplicationFlow:
                 # Apply modal so we don't touch page chrome ("Set alert" etc.)
                 modal = await self._easy_apply_modal()
                 if modal is None:
+                    # The modal can briefly vanish during a slow step transition,
+                    # or close back to the job page (seen on Tiger Analytics /
+                    # ConsumerAffairs). Before giving up: (1) re-poll a few times
+                    # in case it is still re-rendering, then (2) if the Easy Apply
+                    # button is visible again, RE-OPEN it once and re-poll. Only
+                    # abort if it truly stays gone — never scan the full page.
+                    modal = await self._await_modal(retries=4, wait=1.0)
+                    if modal is None and await self._reopen_easy_apply():
+                        modal = await self._await_modal(retries=4, wait=1.0)
+                    if modal is not None:
+                        log.info("apply.modal_recovered", step=step + 1,
+                                 company=listing.company)
+                if modal is None:
                     # SAFETY: detect_form_fields treats scope=None as "scan the
                     # whole page". On LinkedIn that means the bot would start
                     # clicking the user's OWN account UI — the messaging drawer's
@@ -295,6 +308,14 @@ class ApplicationFlow:
                         "(refused to scan the full page)",
                     )
                 fields = await detect_form_fields(self._page, scope=modal)
+                if not fields:
+                    # The modal may still be rendering its content (a 0-field step
+                    # early on usually means it hasn't loaded yet). Wait once and
+                    # re-detect before treating the step as empty — a premature
+                    # advance is what drops us out of a slow-loading modal.
+                    await random_delay(1.3, 2.2)
+                    modal = await self._easy_apply_modal() or modal
+                    fields = await detect_form_fields(self._page, scope=modal)
                 await self._diag_dump_structures(modal)
                 # If this is a résumé step with an "Upload resume" BUTTON (no file
                 # input in the DOM until clicked), push our tailored PDF via the
@@ -456,6 +477,36 @@ class ApplicationFlow:
             log.error("apply.error", error=str(e), title=listing.title)
             await self._dismiss_modal()
             return self._make_record(listing, ApplicationStatus.FAILED, str(e))
+
+    async def _await_modal(self, retries: int = 4, wait: float = 1.0):
+        """Poll for the Easy Apply modal a few times with short waits, to ride
+        out a transient absence while it re-renders between steps. Returns the
+        modal locator or None if it never (re)appears."""
+        for _ in range(max(1, retries)):
+            m = await self._easy_apply_modal()
+            if m is not None:
+                return m
+            await random_delay(wait, wait + 0.6)
+        return None
+
+    async def _reopen_easy_apply(self) -> bool:
+        """If the Easy Apply modal closed back to the job page, click the
+        (re-)visible Easy Apply button to reopen the application. LinkedIn
+        resumes saved progress, so this recovers an unexpectedly-dismissed modal
+        rather than losing the application. Returns True if a button was clicked."""
+        try:
+            btn = self._page.locator(
+                'button:has-text("Easy Apply"), '
+                'button[aria-label*="Easy Apply" i]'
+            )
+            if await btn.count() > 0 and await btn.first.is_visible():
+                await self._scroll_and_click(btn.first)
+                await random_delay(1.2, 2.4)
+                log.info("apply.reopened_easy_apply")
+                return True
+        except Exception as e:
+            log.debug("apply.reopen_failed", error=str(e)[:80])
+        return False
 
     async def _easy_apply_modal(self):
         """Return a locator for the Easy Apply modal container, or None.
