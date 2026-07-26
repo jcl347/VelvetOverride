@@ -29,6 +29,7 @@ async def run_bot(
     locations: list[str] | None = None,
     experience: list[str] | None = None,
     date_posted: str | None = None,
+    require_title: list[str] | None = None,
 ) -> None:
     """Main bot orchestration loop."""
     config = load_config(Path(config_dir) if config_dir else None)
@@ -38,7 +39,8 @@ async def run_bot(
 
     # Search overrides: CLI target roles / locations / experience / date take
     # precedence over settings.yaml so runs can be pointed on the fly.
-    _apply_search_overrides(config, keywords, locations, experience, date_posted)
+    _apply_search_overrides(config, keywords, locations, experience, date_posted,
+                            require_title)
 
     # SAFETY GUARD: never apply with the committed placeholder identity.
     # (config/profile.yaml is a template; your real data belongs in
@@ -281,6 +283,17 @@ async def run_bot(
             )
             if excluded:
                 log.info("bot.skip_title_excluded", title=listing.title, matched=excluded)
+                skipped_count += 1
+                continue
+
+            # Title WHITELIST: when set (e.g. --require-title "AI Engineer"), only
+            # apply to roles whose TITLE contains one of the required phrases, so a
+            # fuzzy keyword search ("AI Engineer" also returns Data/Software roles)
+            # is narrowed to the intended titles. Empty list = no restriction.
+            required_titles = config.search.get("require_title_keywords", [])
+            if not _title_matches_required(listing.title, required_titles):
+                log.info("bot.skip_title_not_matched", title=listing.title,
+                         required=list(required_titles))
                 skipped_count += 1
                 continue
 
@@ -616,10 +629,12 @@ _VALID_EXPERIENCE_LEVELS = (
 
 
 def _apply_search_overrides(config, keywords, locations, experience=None,
-                            date_posted=None) -> None:
+                            date_posted=None, require_title=None) -> None:
     """Override settings.yaml search roles/locations/experience/date with CLI values."""
     if keywords:
         config.settings.setdefault("search", {})["keywords"] = list(keywords)
+    if require_title:
+        config.settings.setdefault("search", {})["require_title_keywords"] = list(require_title)
     if locations:
         config.settings.setdefault("search", {})["locations"] = list(locations)
     if date_posted:
@@ -853,6 +868,18 @@ def _title_excluded(title: str, blacklist: list[str]) -> str | None:
     return None
 
 
+def _title_matches_required(title: str, required) -> bool:
+    """True if no whitelist is configured, or the TITLE contains any of the
+    required phrases (case-insensitive substring). Lets a run be narrowed to
+    specific role titles (e.g. only "AI Engineer" and variants), so a fuzzy
+    keyword search doesn't apply to tangential roles it also returns."""
+    reqs = [str(k).lower().strip() for k in (required or []) if str(k).strip()]
+    if not reqs:
+        return True
+    tl = (title or "").lower()
+    return any(k in tl for k in reqs)
+
+
 # Signals that a role REQUIRES a security clearance the applicant does not hold.
 # A clearance mention in the TITLE is a hard requirement; the JD needs a stronger
 # "active / current / must have" phrase. Deliberately EXCLUDES "ability to obtain"
@@ -956,6 +983,10 @@ def cli(ctx, config_dir, verbose, json_log):
 @click.option("--max-salary", type=int, default=None, help="Maximum annual salary filter (e.g. 200000)")
 @click.option("--keyword", "-k", "keywords", multiple=True,
               help="Target role to search (repeatable). Overrides settings.yaml search.keywords.")
+@click.option("--require-title", "-r", "require_title", multiple=True,
+              help="Only apply to jobs whose TITLE contains this phrase (repeatable). "
+                   "Narrows a fuzzy keyword search, e.g. -k \"AI Engineer\" "
+                   "-r \"AI Engineer\" -r \"Machine Learning Engineer\".")
 @click.option("--location", "-l", "locations", multiple=True,
               help="Location to search (repeatable). Overrides settings.yaml search.locations.")
 @click.option("--experience", "-x", "experience", multiple=True,
@@ -972,7 +1003,8 @@ def cli(ctx, config_dir, verbose, json_log):
 @click.option("--max-loops", type=int, default=0, help="Stop after N passes (0 = unlimited)")
 @click.pass_context
 def run(ctx, dry_run, max_apps, min_salary, max_salary, keywords, locations,
-        experience, date_posted, keep_open, loop, loop_delay, max_loops):
+        experience, date_posted, keep_open, loop, loop_delay, max_loops,
+        require_title):
     """Run the full application bot pipeline (optionally on a continuous loop).
 
     Target roles, locations, and experience levels come from
@@ -983,6 +1015,7 @@ def run(ctx, dry_run, max_apps, min_salary, max_salary, keywords, locations,
     kw = list(keywords) or None
     loc = list(locations) or None
     exp = list(experience) or None
+    req = list(require_title) or None
     if loop:
         # keep_open would block forever, so force it off between passes
         asyncio.run(
@@ -990,13 +1023,14 @@ def run(ctx, dry_run, max_apps, min_salary, max_salary, keywords, locations,
                 ctx.obj["config_dir"], dry_run, max_apps, min_salary, max_salary,
                 loop_delay=loop_delay, max_loops=max_loops,
                 keywords=kw, locations=loc, experience=exp, date_posted=date_posted,
+                require_title=req,
             )
         )
     else:
         asyncio.run(run_bot(
             ctx.obj["config_dir"], dry_run, max_apps, min_salary, max_salary,
             keep_open, keywords=kw, locations=loc, experience=exp,
-            date_posted=date_posted,
+            date_posted=date_posted, require_title=req,
         ))
 
 
@@ -1005,6 +1039,7 @@ async def _run_loop(
     loop_delay: int = 300, max_loops: int = 0,
     keywords: list[str] | None = None, locations: list[str] | None = None,
     experience: list[str] | None = None, date_posted: str | None = None,
+    require_title: list[str] | None = None,
 ) -> None:
     """Re-run the pipeline continuously.
 
@@ -1021,6 +1056,7 @@ async def _run_loop(
                 config_dir, dry_run, max_apps, min_salary, max_salary,
                 keep_open=False, keywords=keywords, locations=locations,
                 experience=experience, date_posted=date_posted,
+                require_title=require_title,
             )
         except KeyboardInterrupt:
             log.info("loop.interrupted", pass_num=pass_num)

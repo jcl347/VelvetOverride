@@ -129,3 +129,24 @@ class TestRemoteOverrideFor:
             remote_override=remote_override_for(config, "United States"))
         assert "location=Seattle" in seattle and _wt(seattle) == "1,2,3"
         assert _wt(us) == "2"
+
+
+class TestTitleWhitelist:
+    """--require-title narrows a fuzzy keyword search to intended role titles."""
+
+    def test_ai_engineer_variants_pass_others_skipped(self):
+        from velvetoverride.main import _title_matches_required as m
+        reqs = ["ai engineer", "artificial intelligence engineer",
+                "machine learning engineer", "ml engineer", "ai/ml engineer"]
+        for keep in ("Forward Deployed AI Engineer (remote)", "Senior AI Engineer",
+                     "Artificial Intelligence Engineer", "Staff ML Engineer",
+                     "AI/ML Engineer"):
+            assert m(keep, reqs) is True, keep
+        for skip in ("Data Engineer", "Software Engineer", "UI Engineer",
+                     "Data Scientist", "DevOps Engineer"):
+            assert m(skip, reqs) is False, skip
+
+    def test_empty_whitelist_allows_everything(self):
+        from velvetoverride.main import _title_matches_required as m
+        assert m("Data Engineer", []) is True
+        assert m("Anything", None) is True
