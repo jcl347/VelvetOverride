@@ -869,15 +869,24 @@ def _title_excluded(title: str, blacklist: list[str]) -> str | None:
 
 
 def _title_matches_required(title: str, required) -> bool:
-    """True if no whitelist is configured, or the TITLE contains any of the
-    required phrases (case-insensitive substring). Lets a run be narrowed to
-    specific role titles (e.g. only "AI Engineer" and variants), so a fuzzy
-    keyword search doesn't apply to tangential roles it also returns."""
+    """True if no whitelist is configured, or the TITLE matches any required
+    pattern. Each pattern is treated as a case-insensitive REGEX (a plain phrase
+    like "ai engineer" is itself a valid regex, so simple substrings still work),
+    falling back to a literal substring test if the pattern isn't valid regex.
+    Lets a run be narrowed to specific role titles (e.g. AI-Engineer variants)
+    so a fuzzy keyword search doesn't apply to tangential roles it also returns."""
     reqs = [str(k).lower().strip() for k in (required or []) if str(k).strip()]
     if not reqs:
         return True
     tl = (title or "").lower()
-    return any(k in tl for k in reqs)
+    for k in reqs:
+        try:
+            if re.search(k, tl):
+                return True
+        except re.error:
+            if k in tl:
+                return True
+    return False
 
 
 # Signals that a role REQUIRES a security clearance the applicant does not hold.

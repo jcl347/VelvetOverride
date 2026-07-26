@@ -150,3 +150,19 @@ class TestTitleWhitelist:
         from velvetoverride.main import _title_matches_required as m
         assert m("Data Engineer", []) is True
         assert m("Anything", None) is True
+
+    def test_regex_ai_qualifier_pattern(self):
+        # A regex whitelist keeps AI/ML-qualified engineer titles (incl. AI
+        # Research/Security/Trust variants and spelled-out AI) while excluding
+        # plain Software/Data engineers that merely mention AI elsewhere.
+        from velvetoverride.main import _title_matches_required as m
+        pat = [r"(\bai\b|artificial intelligence|\bml\b|machine learning)[\w/&,. -]{0,18}engineer"]
+        for keep in ("Senior AI Research Engineer", "AI Security Engineer",
+                     "Artificial Intelligence Engineer", "Senior ML/AI Engineer",
+                     "Machine Learning Engineer", "Forward Deployed AI Engineer",
+                     "AI Trust and Safety Engineer"):
+            assert m(keep, pat) is True, keep
+        for skip in ("Staff Software Engineer, ML/AI Platform", "Data Engineer",
+                     "UI Engineer", "Data Scientist",
+                     "AI Native Product Builder (K-12 Prototype Engineer)"):
+            assert m(skip, pat) is False, skip
