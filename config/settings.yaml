@@ -232,7 +232,10 @@ resume:
   #   reorder_bullets: true  → surface the most JD-relevant bullets first
   #   max_bullets_per_job: null → keep every bullet (template shows the top ones)
   # Bullet TEXT is never rewritten — only ordered — so impacts stay truthful.
-  reorder_bullets: true
+  # Kept false so the profile's own bullet order is preserved (the template
+  # shows the top 3), guaranteeing the intended lead bullets — e.g. the DHCS
+  # RSST core-designer credit — always appear rather than being re-ranked out.
+  reorder_bullets: false
   max_bullets_per_job: null
 
 # ─── Tracking / Database ───────────────────────────────────────
