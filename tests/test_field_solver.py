@@ -951,6 +951,28 @@ class TestExperienceAndGraduationDates:
         assert ans == "11"                   # general career question keeps the total
 
     @pytest.mark.asyncio
+    async def test_general_experience_with_tech_token_uses_total(self):
+        # A career/seniority question that also names a tech ("professional
+        # experience in Machine Learning or Software Engineering") must return the
+        # TOTAL (11), not the ML-specific years (4). The general phrasing has to
+        # win over the incidental tech token — this was the Attis mis-answer.
+        fs = FieldSolver(_exp_config(), llm=None)
+        for q in (
+            "How many years of professional experience do you have in Machine Learning or Software Engineering?",
+            "Years of professional experience in AI / Machine Learning or Software Engineering",
+        ):
+            ans, _, _ = await fs.solve(_make_field(q, FieldType.NUMERIC))
+            assert ans == "11", q
+
+    @pytest.mark.asyncio
+    async def test_specific_ml_question_still_returns_ml_years(self):
+        # The reorder must NOT break a genuinely tech-specific question.
+        fs = FieldSolver(_exp_config(), llm=None)
+        ans, _, _ = await fs.solve(
+            _make_field("How many years of experience with Machine Learning?", FieldType.NUMERIC))
+        assert ans == "4"
+
+    @pytest.mark.asyncio
     async def test_graduation_year_from_real_education_dates(self):
         fs = FieldSolver(_exp_config(), llm=None)
         for label in (

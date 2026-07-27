@@ -275,40 +275,43 @@ class FieldSolver:
         numeric = self._answers.get("numeric", {})
         exp_patterns = numeric.get("experience_patterns", [])
         if any(p.lower() in label for p in exp_patterns):
+            total = numeric.get("total_experience_years")
+            numeric_text = field.field_type in (FieldType.NUMERIC, FieldType.TEXT)
+            # STRONG general / field / career-length markers -> the real total,
+            # even if the question also names a technology. "Professional
+            # experience in AI/ML or Software Engineering" is a seniority question
+            # (~11 yrs), NOT "years with ML" (4) — so these win BEFORE the per-tech
+            # resolver, stopping an incidental "ml"/"ai" token from capping it.
+            # ~11 yrs since Aug 2015 (matches the EE resume timeline). Numeric /
+            # short-text ONLY — never a textarea like "Describe your experience".
+            strong_general = any(m in label for m in (
+                "total years", "overall experience", "total experience",
+                "overall years", "industry experience", "software engineering",
+                "software development", "software engineer", "programming",
+                "coding experience", "development experience", "in the industry",
+                "as a software", "as an engineer", "as a developer",
+                "years of experience in software",
+            ))
+            if total is not None and strong_general and numeric_text:
+                return str(total)
+            # A SPECIFIC technology in the profile -> that tech's real years.
+            # ("professional experience WITH Python" -> 5, not the total.)
             years = self._resolve_experience_years(label)
             if years is not None:
                 return years
-            # No specific technology matched. If this is a GENERIC "total /
-            # overall / professional years of experience" question, answer from
-            # the real career length (EE resume timeline, ~11 yrs since Aug 2015)
-            # rather than a blind default or an LLM guess that never sees the
-            # pre-2023 history. Numeric / short-text fields ONLY — never a
-            # textarea like "Describe your work experience", and never an
-            # unknown *specific* technology (which stays an honest LLM answer).
-            total = numeric.get("total_experience_years")
-            # GENERAL experience / career-length questions get the real total.
-            # A SPECIFIC technology not in the profile does NOT — it must get a
-            # small honest number, never the career total.
-            is_general = any(m in label for m in (
-                "professional experience", "work experience", "total years",
-                "overall experience", "years of professional", "overall years",
-                "total experience", "industry experience",
-                "software engineering", "software development", "software engineer",
-                "programming", "coding experience", "development experience",
-                "in the industry", "as a software", "as an engineer",
-                "as a developer", "years of experience in software",
+            # WEAK general markers (bare "professional / work experience") with no
+            # specific tech in the question -> the real career total.
+            weak_general = any(m in label for m in (
+                "professional experience", "work experience", "years of professional",
             ))
-            if (
-                total is not None and is_general
-                and field.field_type in (FieldType.NUMERIC, FieldType.TEXT)
-            ):
+            if total is not None and weak_general and numeric_text:
                 return str(total)
             # Unknown SPECIFIC technology (e.g. Kubernetes, not in the profile):
             # answer a small, honest default rather than deferring to the LLM,
             # which tends to echo the TOTAL career length (e.g. "11 years") for a
             # tool the applicant barely uses. Accuracy over inflation — when
             # unsure, a smaller number is the safer, truthful choice.
-            if field.field_type in (FieldType.NUMERIC, FieldType.TEXT):
+            if numeric_text:
                 return str(self._config.technology_experience.get("default", 1))
             if numeric.get("llm_for_unknown_tech", True) and self._llm:
                 return None  # → Tier 6 LLM fallback (non-numeric only)
