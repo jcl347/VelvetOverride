@@ -352,6 +352,7 @@ class ApplicationFlow:
             max_stuck = int(self._config.bot.get("max_stuck_retries", 4))
             last_signature = None
             stuck_count = 0
+            signature_counts: dict = {}   # how often each form state has recurred
             last_errors: list[str] = []
             self._resume_uploaded_this_app = False  # reset per application
             self._checkbox_recovered: set[str] = set()  # steps we've tried the
@@ -451,6 +452,28 @@ class ApplicationFlow:
                     tuple(errors),
                     await self._is_review_step(),
                 )
+                # Count total visits to this exact state. A healthy form visits
+                # each state once and advances; an oscillating one (Review ->
+                # validation error -> Back -> ... on a required field it can't
+                # fill, e.g. CoverGo's unreadable year-experience radios) revisits
+                # states A-B-A-B without the consecutive "== last_signature" check
+                # ever tripping — so it ran nearly to max_steps (~10 min) before
+                # stopping. Catch the cycle even when visits aren't consecutive.
+                # Only states with something to be stuck ON count — an empty
+                # transition step (no fields, no errors) that legitimately shares a
+                # marker must never trip this.
+                if fields or errors:
+                    revisits = signature_counts.get(signature, 0) + 1
+                    signature_counts[signature] = revisits
+                    if revisits >= max_stuck and not await self._is_review_step():
+                        diag = await self._stuck_diagnostics(fields, modal, listing)
+                        reason = (f"Cycling on form step {step + 1} "
+                                  f"(state revisited {revisits}x — a field won't take)")
+                        log.error("apply.form_cycle_giveup", reason=reason,
+                                  revisits=revisits, diag=diag)
+                        await self._dismiss_modal()
+                        return self._make_record(listing, ApplicationStatus.FAILED, reason)
+
                 if signature == last_signature:
                     stuck_count += 1
                     log.warning(
