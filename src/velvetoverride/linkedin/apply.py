@@ -148,9 +148,15 @@ def _match_year_range_option(value: str, options: list[str]) -> str | None:
     if not m:
         return None
     n = int(m.group(1))
+    # A years bucket is a small count; a value in the thousands is a salary, not
+    # a number of years. Refuse so this never touches a compensation dropdown.
+    if n > 60:
+        return None
     plus_match = None
     for opt in options:
         ol = (opt or "").lower()
+        if "$" in ol or ",000" in ol or "salary" in ol or "compensation" in ol:
+            return None  # a dollar/comp dropdown — not a years dropdown
         if not re.search(r"\d", ol):
             continue
         rng = re.search(r"(\d+)\s*(?:-|–|—|to)\s*(\d+)", ol)
@@ -174,6 +180,56 @@ def _match_year_range_option(value: str, options: list[str]) -> str | None:
         exact = re.search(r"\b(\d+)\b", ol)
         if exact and n == int(exact.group(1)):
             return opt
+    return plus_match
+
+
+def _parse_money(text: str) -> list[int]:
+    """Extract dollar amounts from an option, handling $, commas, and K/M
+    ("$100,000" -> 100000, "$150K" -> 150000, "$1.2M" -> 1200000)."""
+    out: list[int] = []
+    for m in re.finditer(r"\$?\s*(\d[\d,]*(?:\.\d+)?)\s*([kKmM])?", text or ""):
+        raw = m.group(1).replace(",", "")
+        if not raw or raw == ".":
+            continue
+        try:
+            val = float(raw)
+        except ValueError:
+            continue
+        suf = (m.group(2) or "").lower()
+        if suf == "k":
+            val *= 1_000
+        elif suf == "m":
+            val *= 1_000_000
+        out.append(int(val))
+    return out
+
+
+def _match_salary_range_option(value: str, options: list[str]) -> str | None:
+    """For a compensation/salary dropdown, pick the band containing the desired
+    amount ("125000" -> "$100,000 - $150,000"). Prefers a bounded band over an
+    open-ended "$200,000+" so the amount lands in the tightest matching band."""
+    vm = re.search(r"\d[\d,]*", str(value or ""))
+    if not vm:
+        return None
+    v = int(vm.group(0).replace(",", ""))
+    if v < 1000:  # not a salary figure (likely a plain number/years)
+        return None
+    plus_match = None
+    for opt in options:
+        ol = (opt or "").lower()
+        amts = _parse_money(opt)
+        if not amts:
+            continue
+        if len(amts) >= 2 and amts[0] <= v <= amts[1]:
+            return opt
+        if len(amts) == 1:
+            a = amts[0]
+            if any(k in ol for k in ("+", "more", "above", "over", "at least", "greater")):
+                if v >= a and plus_match is None:
+                    plus_match = opt
+            elif any(k in ol for k in ("less", "under", "below", "up to")):
+                if v <= a:
+                    return opt
     return plus_match
 
 NEXT_SELECTOR = (
@@ -1590,14 +1646,26 @@ class ApplicationFlow:
                 await field.locator.select_option(label=clr, timeout=3000)
                 log.info("apply.dropdown_clearance_matched", label=field.label[:50], chose=clr)
                 return
+            label_l = (field.label or "").lower()
             # 2.8) "How many years ...?" dropdown whose options are year RANGES
             #      ("0-1", "3-5 years", "7+") -> pick the range containing our
-            #      number, so a numeric answer like "5" isn't left unselected.
-            yr = _match_year_range_option(value, option_texts)
-            if yr is not None:
-                await field.locator.select_option(label=yr, timeout=3000)
-                log.info("apply.dropdown_year_range_matched", label=field.label[:50], chose=yr)
-                return
+            #      number. GATED to years/experience questions so it never touches
+            #      a salary/compensation dropdown (a $ amount is not a year count).
+            if any(k in label_l for k in ("year", "experience", "yrs")) \
+                    and not any(k in label_l for k in ("salary", "compensation", "pay", "comp ")):
+                yr = _match_year_range_option(value, option_texts)
+                if yr is not None:
+                    await field.locator.select_option(label=yr, timeout=3000)
+                    log.info("apply.dropdown_year_range_matched", label=field.label[:50], chose=yr)
+                    return
+            # 2.9) Compensation/salary dropdown whose options are $ BANDS -> pick
+            #      the band containing the desired amount ("125000" -> "$100k-150k").
+            if any(k in label_l for k in ("salary", "compensation", "pay", "comp ", "ctc")):
+                sal = _match_salary_range_option(value, option_texts)
+                if sal is not None:
+                    await field.locator.select_option(label=sal, timeout=3000)
+                    log.info("apply.dropdown_salary_range_matched", label=field.label[:50], chose=sal)
+                    return
         except Exception:
             pass
         # 3) No confident match — do NOT pick an arbitrary option. Selecting a
@@ -1812,6 +1880,22 @@ class ApplicationFlow:
             return True
         return False
 
+    @staticmethod
+    def _is_decline(text: str) -> bool:
+        """True if the text is an EEO "decline to answer" choice, however phrased.
+        The solver emits a generic "Prefer not to say", but real forms word it many
+        ways ("I prefer not to specify", "I do not want to answer", "Decline to
+        self-identify"). Read-back treats any decline<->decline pair as a match so a
+        correctly-declined EEO field isn't flagged as a mismatch."""
+        t = (text or "").lower()
+        if any(k in t for k in (
+            "prefer not", "do not want to answer", "don't want to answer",
+            "not to disclose", "not to answer", "not to specify",
+            "decline to", "choose not to", "rather not", "not wish to",
+        )):
+            return True
+        return False
+
     async def _verify_radio(self, field, intended: str, radios) -> None:
         """After selecting, log which option actually ended up checked vs what we
         intended — so a mis-selection (e.g. sponsorship left at the default "Yes")
@@ -1883,7 +1967,13 @@ class ApplicationFlow:
                         continue
                 if not checked_txt:
                     return (False, "(none selected)")
-                return (self._option_matches_value(want, checked_txt.lower()), checked_txt)
+                if self._option_matches_value(want, checked_txt.lower()):
+                    return (True, checked_txt)
+                # "Prefer not to say" (intended) vs "I prefer not to specify" (actual)
+                # are the same decline choice worded differently — not a mismatch.
+                if self._is_decline(want) and self._is_decline(checked_txt):
+                    return (True, checked_txt)
+                return (False, checked_txt)
 
             if ft == FieldType.DROPDOWN:
                 actual = ""
@@ -1904,7 +1994,15 @@ class ApplicationFlow:
                 if not actual:
                     return (None, "(unreadable)")  # custom widget — don't false-flag
                 al = actual.lower()
-                ok = (want in al or al in want or self._option_matches_value(want, al))
+                ok = (want in al or al in want or self._option_matches_value(want, al)
+                      or (self._is_decline(want) and self._is_decline(al)))
+                if not ok:
+                    # A numeric answer selected into a $ salary band or a year
+                    # range: the actual text is the band ("$100k-$150k" /
+                    # "3-5 years"), not the number, so verify by containment.
+                    if _match_salary_range_option(want, [actual]) == actual \
+                            or _match_year_range_option(want, [actual]) == actual:
+                        ok = True
                 return (ok, actual[:40])
 
             # TEXT / NUMERIC / TEXTAREA

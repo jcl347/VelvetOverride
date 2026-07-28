@@ -105,3 +105,50 @@ async def test_select_dropdown_verified():
         await page.locator("#d").select_option("us")
         ok, actual = await flow._readback_field(_field(page, "#d", "DROPDOWN"), "United States")
         assert ok is True and "united states" in actual.lower()
+
+
+async def test_eeo_decline_worded_differently_is_verified():
+    # Intended generic "Prefer not to say" vs the form's "I prefer not to specify"
+    # is the same decline choice — read-back must NOT flag it as a mismatch.
+    html = ('<div role="dialog"><fieldset>'
+            '<div><input type="radio" id="a" name="race"><label for="a">White</label></div>'
+            '<div><input type="radio" id="z" name="race"><label for="z">I prefer not to specify</label></div>'
+            '</fieldset></div>')
+    async for flow, page in _flow_page(html):
+        await page.locator("#z").check(force=True)
+        ok, actual = await flow._readback_field(
+            _field(page, "#a", "RADIO", label="Race/Ethnicity"), "Prefer not to say")
+        assert ok is True
+        assert "prefer not" in actual.lower()
+
+
+async def test_eeo_disability_decline_variant_verified():
+    # "I do not want to answer" also counts as a decline vs intended "Prefer not to say".
+    html = ('<div role="dialog"><fieldset>'
+            '<div><input type="radio" id="d0" name="dis"><label for="d0">Yes, I have a disability</label></div>'
+            '<div><input type="radio" id="d2" name="dis"><label for="d2">I do not want to answer</label></div>'
+            '</fieldset></div>')
+    async for flow, page in _flow_page(html):
+        await page.locator("#d2").check(force=True)
+        ok, _ = await flow._readback_field(
+            _field(page, "#d0", "RADIO", label="Disability"), "Prefer not to say")
+        assert ok is True
+
+
+async def test_compensation_dropdown_readback_matches_band():
+    # The solver's answer is the raw number "125000"; the salary matcher selects
+    # the "$100,000 - $150,000" band. Read-back sees the band text (not the number)
+    # and must still verify by band-containment — not false-flag a correct pick.
+    html = ('<div role="dialog"><select id="c">'
+            '<option value="">Select</option>'
+            '<option>$100,000 - $150,000</option>'
+            '<option>$200,000+</option></select></div>')
+    async for flow, page in _flow_page(html):
+        await page.locator("#c").select_option(label="$100,000 - $150,000")
+        ok, actual = await flow._readback_field(
+            _field(page, "#c", "DROPDOWN", label="Compensation"), "125000")
+        assert ok is True and "100,000" in actual
+        # A number OUTSIDE the selected band is still a genuine mismatch.
+        bad, _ = await flow._readback_field(
+            _field(page, "#c", "DROPDOWN", label="Compensation"), "300000")
+        assert bad is False
