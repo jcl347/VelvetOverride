@@ -1511,6 +1511,35 @@ class ApplicationFlow:
             except Exception as e:
                 log.warning("apply.field_error", label=field.label, error=str(e))
 
+    async def _fit_to_maxlength(self, field: FormField, value: str) -> str:
+        """Respect a text input's maxlength. A short cap (e.g. 20) means the form
+        wants a terse answer, so a verbose LLM reply ("Yes, I have experience
+        building...") is condensed to Yes/No or an embedded number, else truncated
+        at a word boundary. Prevents a silent "Invalid input" that stalls the
+        form on a required short-text field (Visionary "Marketing products exp?")."""
+        try:
+            ml = await field.locator.get_attribute("maxlength")
+            maxlen = int(ml) if ml and ml.strip() else 0
+        except Exception:
+            maxlen = 0
+        if maxlen <= 0 or len(value) <= maxlen:
+            return value
+        low = value.lower().lstrip()
+        if low.startswith("yes") and maxlen >= 3:
+            return "Yes"
+        if low.startswith("no") and maxlen >= 2:
+            return "No"
+        m = re.search(r"\d+", value)
+        if m and len(m.group(0)) <= maxlen:
+            return m.group(0)
+        truncated = value[:maxlen]
+        if " " in truncated:
+            truncated = truncated[:truncated.rfind(" ")]
+        result = truncated or value[:maxlen]
+        log.info("apply.text_fit_maxlength", label=field.label[:40],
+                 maxlen=maxlen, chose=result[:30])
+        return result
+
     async def _set_field_value(self, field: FormField, value: str) -> None:
         """Set the value of a form field based on its type."""
         match field.field_type:
@@ -1521,10 +1550,12 @@ class ApplicationFlow:
                     await field.locator.type(str(value), delay=40)
                     await self._pick_typeahead(field, str(value))
                 else:
+                    value = await self._fit_to_maxlength(field, str(value))
                     await field.locator.fill(str(value))
 
             case FieldType.TEXTAREA:
                 await field.locator.fill("")
+                value = await self._fit_to_maxlength(field, str(value))
                 await field.locator.fill(str(value))
 
             case FieldType.DROPDOWN:
@@ -1726,13 +1757,34 @@ class ApplicationFlow:
             # Fallback: look in parent fieldset
             radios = field.locator.locator("xpath=ancestor::fieldset").locator('input[type="radio"]')
 
+        opt_texts: list[str] = []
         for i in range(await radios.count()):
             radio = radios.nth(i)
             otext = (await self._radio_visible_text(radio)).strip().lower()
+            opt_texts.append(otext)
             if self._option_matches_value(value_lower, otext):
                 await self._click_choice_input(radio)
                 await self._verify_radio(field, value, radios)
                 return
+
+        # NUMERIC answer on a Yes/No radio: a terse tech question ("ReactJS?*")
+        # with Yes/No options sometimes gets a number of years from the LLM. A
+        # radio has no "3" option, so nothing is selected and a REQUIRED field
+        # stalls the whole form. Treat a positive count as "Yes" (I have that
+        # experience), 0 as "No". Only fires when the group is genuinely binary
+        # (has both a yes- and a no-option) so year-range radios are untouched.
+        if re.fullmatch(r"\d+(?:\.\d+)?", value.strip()):
+            has_yes = any(o == "yes" or o.startswith("yes") for o in opt_texts)
+            has_no = any(o == "no" or o.startswith("no") for o in opt_texts)
+            if has_yes and has_no and len(opt_texts) <= 3:
+                target = "yes" if float(value) > 0 else "no"
+                for i, otext in enumerate(opt_texts):
+                    if otext == target or otext.startswith(target):
+                        await self._click_choice_input(radios.nth(i))
+                        await self._verify_radio(field, value, radios)
+                        log.info("apply.radio_numeric_to_yesno",
+                                 label=field.label[:50], value=value, chose=target)
+                        return
 
         # DECLINE intent (EEO / voluntary self-identification): the desired value
         # is a "prefer not to say" phrase that rarely matches the option text
@@ -1973,6 +2025,13 @@ class ApplicationFlow:
                 # are the same decline choice worded differently — not a mismatch.
                 if self._is_decline(want) and self._is_decline(checked_txt):
                     return (True, checked_txt)
+                # A numeric answer mapped onto a Yes/No radio (positive count ->
+                # Yes, 0 -> No): the DOM shows "Yes"/"No", not the number.
+                ctl = checked_txt.lower()
+                if re.fullmatch(r"\d+(?:\.\d+)?", want):
+                    if (float(want) > 0 and ctl.startswith("yes")) or \
+                            (float(want) == 0 and ctl.startswith("no")):
+                        return (True, checked_txt)
                 return (False, checked_txt)
 
             if ft == FieldType.DROPDOWN:

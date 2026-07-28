@@ -93,3 +93,35 @@ async def test_no_not_flipped_by_empty_yes_label():
 async def test_no_selects_verbose_no_option():
     checked = await _run(_VERBOSE, "No", "v_y")
     assert checked["v_n"] is True and checked["v_y"] is False
+
+
+# A terse tech question ("ReactJS?*") is a Yes/No radio, but the LLM answers it
+# with a number of years. A radio has no "3" option, so nothing was selected and
+# the required field stalled the whole form (Visionary Innovative Technology).
+async def test_numeric_answer_maps_to_yes_on_binary_radio():
+    checked = await _run(_YESNO, "3", "sp_y")
+    assert checked["sp_y"] is True and checked["sp_n"] is False
+
+
+async def test_zero_maps_to_no_on_binary_radio():
+    checked = await _run(_YESNO, "0", "sp_y")
+    assert checked["sp_n"] is True and checked["sp_y"] is False
+
+
+# The number->Yes/No mapping must ONLY fire on a genuine Yes/No group. On a
+# year-range radio, "3" must land on a range option (via the primary match),
+# never be coerced — so nothing here is a Yes/No group at all.
+_YEAR_RANGE = """
+<div role="dialog"><fieldset>
+  <div><input type="radio" id="yr0" name="exp"><label for="yr0">0-2 years</label></div>
+  <div><input type="radio" id="yr1" name="exp"><label for="yr1">3-5 years</label></div>
+  <div><input type="radio" id="yr2" name="exp"><label for="yr2">6+ years</label></div>
+</fieldset></div>
+"""
+
+
+async def test_numeric_on_year_range_radio_selects_a_range():
+    # "3" should select a range option, not be dropped or coerced to Yes/No.
+    checked = await _run(_YEAR_RANGE, "3", "yr0")
+    assert any(checked.values()), "a year-range option should be selected"
+    assert checked["yr1"] is True  # "3-5 years" contains 3 on a word boundary
