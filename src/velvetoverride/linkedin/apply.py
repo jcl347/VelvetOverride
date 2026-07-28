@@ -1685,25 +1685,25 @@ class ApplicationFlow:
             for i in range(await radios.count()):
                 r = radios.nth(i)
                 try:
-                    txt = ""
-                    rid = await r.get_attribute("id")
-                    if rid and '"' not in rid and "\\" not in rid:
-                        lab = self._page.locator(f'label[for="{rid}"]')
-                        if await lab.count() > 0:
-                            txt = (await lab.first.text_content() or "").strip().lower()
-                    if not txt:
-                        wrap = r.locator("xpath=ancestor::label[1]")
-                        if await wrap.count() > 0:
-                            txt = (await wrap.first.text_content() or "").strip().lower()
-                    if not txt:
-                        txt = (await r.get_attribute("value") or "").lower()
+                    # Use the robust reader — LinkedIn renders the option text in a
+                    # sibling span, so label[for] comes back empty and the decline
+                    # option ("I prefer not to specify") was being missed, leaving
+                    # EEO fields blank on real forms.
+                    txt = (await self._radio_visible_text(r)).strip().lower()
                     if any(m in txt for m in _decline_markers):
                         await self._click_choice_input(r)
                         log.info("apply.eeo_declined", label=field.label[:50], chose=txt[:30])
                         return
                 except Exception:
                     continue
-            log.warning("apply.eeo_no_decline_option", label=field.label[:60])
+            opts_dbg = []
+            for i in range(await radios.count()):
+                try:
+                    opts_dbg.append((await self._radio_visible_text(radios.nth(i))).strip()[:32])
+                except Exception:
+                    pass
+            log.warning("apply.eeo_no_decline_option", label=field.label[:60],
+                        options=opts_dbg[:10])
             return  # leave unselected — never select a real demographic
 
         # Fallback: if affirmative, find the option whose label actually reads

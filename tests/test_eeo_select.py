@@ -107,3 +107,22 @@ async def test_disability_declines_never_claims_disability():
     checked = await _run(_DISABILITY, "Prefer not to say", "d0")
     assert checked["d2"] is True                      # "I do not want to answer"
     assert checked["d0"] is False                     # NEVER "Yes, I have a disability"
+
+
+# EEO options whose visible text is in a SIBLING span (empty label[for]) — the
+# real-form case (Ranger, etc.) where the decline option read as empty and the
+# whole EEO group was wrongly left blank ("no decline option").
+_RACE_SIBLING_SPAN = """
+<div role="dialog"><fieldset>
+  <div><input type="radio" id="s0" name="race"><span>Hispanic or Latino</span></div>
+  <div><input type="radio" id="s1" name="race"><span>White (Not Hispanic or Latino)</span></div>
+  <div><input type="radio" id="s2" name="race"><span>Two or More Races</span></div>
+  <div><input type="radio" id="s3" name="race"><span>I prefer not to specify</span></div>
+</fieldset></div>
+"""
+
+
+async def test_decline_selected_when_option_text_in_sibling_span():
+    checked = await _run(_RACE_SIBLING_SPAN, "Prefer not to say", "s0")
+    assert checked["s3"] is True                              # the decline option
+    assert not any(checked[k] for k in ("s0", "s1", "s2"))   # no real demographic
