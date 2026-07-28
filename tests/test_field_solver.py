@@ -972,6 +972,93 @@ class TestExperienceAndGraduationDates:
             _make_field("How many years of experience with Machine Learning?", FieldType.NUMERIC))
         assert ans == "4"
 
+
+class TestExperienceOnChoiceFields:
+    """A RADIO/DROPDOWN asking about experience is a Yes/No — it must NEVER get a
+    raw number (which matches no option and silently breaks the form, as seen on
+    a Worldwide Flight Services application where sponsorship then defaulted)."""
+
+    @pytest.mark.asyncio
+    async def test_do_you_have_experience_with_tech_is_yes_not_number(self):
+        fs = FieldSolver(_exp_config(), llm=None)
+        ans, _, _ = await fs.solve(_make_field(
+            "Do you have hands-on professional experience with Python?",
+            FieldType.RADIO, options=["Yes", "No"]))
+        assert ans == "Yes"          # NOT "5"
+
+    @pytest.mark.asyncio
+    async def test_at_least_n_years_met_is_yes(self):
+        fs = FieldSolver(_exp_config(), llm=None)
+        ans, _, _ = await fs.solve(_make_field(
+            "Do you have at least 6 years of professional experience developing software?",
+            FieldType.RADIO, options=["Yes", "No"]))
+        assert ans == "Yes"          # 11 total >= 6; NOT "4"
+
+    @pytest.mark.asyncio
+    async def test_at_least_n_years_not_met_is_no(self):
+        fs = FieldSolver(_exp_config(), llm=None)
+        ans, _, _ = await fs.solve(_make_field(
+            "Do you have at least 15 years of experience with Python?",
+            FieldType.RADIO, options=["Yes", "No"]))
+        assert ans == "No"           # Python 5 < 15 -> honest No
+
+    @pytest.mark.asyncio
+    async def test_choice_experience_never_returns_a_number(self):
+        fs = FieldSolver(_exp_config(), llm=None)
+        for q in (
+            "Do you have experience with Machine Learning?",
+            "Do you have 3+ years of experience with Python?",
+            "Years of professional experience with Software Engineering?",
+        ):
+            ans, _, _ = await fs.solve(
+                _make_field(q, FieldType.RADIO, options=["Yes", "No"]))
+            assert not str(ans).isdigit(), (q, ans)
+
+    @pytest.mark.asyncio
+    async def test_general_threshold_uses_total_not_tech(self):
+        # "at least 6 years of PROFESSIONAL EXPERIENCE developing ML systems" is a
+        # seniority threshold (total 11 >= 6 -> Yes), not "6 years of ML" (4 -> No)
+        # just because "ML" appears. Tech-scoped "...with Python" still uses Python.
+        fs = FieldSolver(_exp_config(), llm=None)
+        yes, _, _ = await fs.solve(_make_field(
+            "Do you have at least 6 years of professional experience developing Machine Learning systems?",
+            FieldType.RADIO, options=["Yes", "No"]))
+        assert yes == "Yes"
+        no, _, _ = await fs.solve(_make_field(
+            "Do you have at least 15 years of experience with Python?",
+            FieldType.RADIO, options=["Yes", "No"]))
+        assert no == "No"
+
+    @pytest.mark.asyncio
+    async def test_how_many_years_dropdown_gets_number_not_yesno(self):
+        # A "how many years...?" DROPDOWN is a quantity question — it must get a
+        # NUMBER (the selector maps it to a year-range option), NOT "Yes" (which
+        # matches no option and stalls the form, as seen live on a Tebra form).
+        fs = FieldSolver(_exp_config(), llm=None)
+        ans, _, _ = await fs.solve(_make_field(
+            "How many years of experience do you have writing Python?",
+            FieldType.DROPDOWN, options=["0-1 years", "2-3 years", "3-5 years"]))
+        assert ans == "5"           # Python years, not "Yes"
+
+    @pytest.mark.asyncio
+    async def test_do_you_have_experience_still_yes_on_radio(self):
+        fs = FieldSolver(_exp_config(), llm=None)
+        ans, _, _ = await fs.solve(_make_field(
+            "Do you have experience with Python?", FieldType.RADIO,
+            options=["Yes", "No"]))
+        assert ans == "Yes"
+
+    @pytest.mark.asyncio
+    async def test_unknown_tech_experience_defers_to_llm(self):
+        # With an LLM present, an unknown-tech "do you have experience?" defers
+        # (honest answer) instead of a blind number or overstated Yes.
+        mock = _MockLLM(reply="No")
+        fs = FieldSolver(_exp_config(), llm=mock)
+        _, src, _ = await fs.solve(_make_field(
+            "Do you have experience with Kubernetes?", FieldType.RADIO,
+            options=["Yes", "No"]))
+        assert src == "llm" and mock.calls
+
     @pytest.mark.asyncio
     async def test_graduation_year_from_real_education_dates(self):
         fs = FieldSolver(_exp_config(), llm=None)

@@ -119,6 +119,7 @@ search:
     - "Revature"
     - "TikTok"
     - "Jobgether"
+    - "Robert Half"
   # Skip roles that REQUIRE an active/current security clearance you don't hold
   # (matched on the job title and full JD). "Ability to obtain" clearances are
   # sponsored and are NOT skipped. Set to false if you actually hold a clearance.

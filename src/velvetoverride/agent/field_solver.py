@@ -275,47 +275,23 @@ class FieldSolver:
         numeric = self._answers.get("numeric", {})
         exp_patterns = numeric.get("experience_patterns", [])
         if any(p.lower() in label for p in exp_patterns):
-            total = numeric.get("total_experience_years")
             numeric_text = field.field_type in (FieldType.NUMERIC, FieldType.TEXT)
-            # STRONG general / field / career-length markers -> the real total,
-            # even if the question also names a technology. "Professional
-            # experience in AI/ML or Software Engineering" is a seniority question
-            # (~11 yrs), NOT "years with ML" (4) — so these win BEFORE the per-tech
-            # resolver, stopping an incidental "ml"/"ai" token from capping it.
-            # ~11 yrs since Aug 2015 (matches the EE resume timeline). Numeric /
-            # short-text ONLY — never a textarea like "Describe your experience".
-            strong_general = any(m in label for m in (
-                "total years", "overall experience", "total experience",
-                "overall years", "industry experience", "software engineering",
-                "software development", "software engineer", "programming",
-                "coding experience", "development experience", "in the industry",
-                "as a software", "as an engineer", "as a developer",
-                "years of experience in software",
+            # A QUANTITY question ("how many years ...?") wants a NUMBER — even as
+            # a dropdown, which offers year RANGES the selector maps the number to.
+            # (A radio/dropdown that got "Yes" here matched no option and stalled
+            # the form — seen live on a Tebra "how many years" dropdown.)
+            is_quantity = any(m in label for m in (
+                "how many year", "how many yr", "number of year", "# of year",
+                "how much experience",
             ))
-            if total is not None and strong_general and numeric_text:
-                return str(total)
-            # A SPECIFIC technology in the profile -> that tech's real years.
-            # ("professional experience WITH Python" -> 5, not the total.)
-            years = self._resolve_experience_years(label)
-            if years is not None:
-                return years
-            # WEAK general markers (bare "professional / work experience") with no
-            # specific tech in the question -> the real career total.
-            weak_general = any(m in label for m in (
-                "professional experience", "work experience", "years of professional",
-            ))
-            if total is not None and weak_general and numeric_text:
-                return str(total)
-            # Unknown SPECIFIC technology (e.g. Kubernetes, not in the profile):
-            # answer a small, honest default rather than deferring to the LLM,
-            # which tends to echo the TOTAL career length (e.g. "11 years") for a
-            # tool the applicant barely uses. Accuracy over inflation — when
-            # unsure, a smaller number is the safer, truthful choice.
-            if numeric_text:
-                return str(self._config.technology_experience.get("default", 1))
-            if numeric.get("llm_for_unknown_tech", True) and self._llm:
-                return None  # → Tier 6 LLM fallback (non-numeric only)
-            return str(self._config.technology_experience.get("default", 1))
+            if numeric_text or is_quantity:
+                return self._experience_number(label)
+            # Otherwise a CHOICE field is a Yes/No ("Do you have experience with
+            # X?" / "at least N years?") — never a raw number.
+            yn = self._experience_yes_no(label)
+            if yn is not None:
+                return yn
+            # Unknown/unclear -> fall through to the yes/no default / LLM.
 
         # Salary
         salary = numeric.get("salary", {})
@@ -894,6 +870,73 @@ class FieldSolver:
             if any(kw in ol for kw in kws):
                 return option
         return None
+
+    def _experience_number(self, label: str) -> str:
+        """Years for a QUANTITY experience question. Strong general/career markers
+        -> the real total; a specific profile tech -> that tech's years; a bare
+        'work/professional experience' (no specific tech) -> total; an unknown
+        specific tech -> a small honest default (never the inflated total)."""
+        total = self._answers.get("numeric", {}).get("total_experience_years")
+        strong_general = any(m in label for m in (
+            "total years", "overall experience", "total experience", "overall years",
+            "industry experience", "software engineering", "software development",
+            "software engineer", "programming experience", "years of programming",
+            "coding experience", "development experience", "in the industry",
+            "engineering experience", "years of engineering", "as a software",
+            "as an engineer", "as a developer", "years of experience in software",
+        ))
+        if total is not None and strong_general:
+            return str(total)
+        years = self._resolve_experience_years(label)
+        if years is not None:
+            return years
+        weak_general = any(m in label for m in (
+            "professional experience", "work experience", "years of professional",
+        ))
+        if total is not None and weak_general and " with " not in label:
+            return str(total)
+        return str(self._config.technology_experience.get("default", 1))
+
+    def _experience_yes_no(self, label: str) -> str | None:
+        """For a CHOICE field asking about experience ("Do you have experience
+        with X?" / "Do you have at least N years of ...?"), return "Yes"/"No"
+        from whether the applicant meets it — never a raw number (which matches
+        no radio option and breaks the form). Returns None when unclear so the
+        caller can defer to the yes/no default or the LLM."""
+        m = (re.search(r"at least (\d+)", label)
+             or re.search(r"minimum (?:of )?(\d+)", label)
+             or re.search(r"(\d+)\s*\+?\s*years", label))
+        threshold = int(m.group(1)) if m else None
+        tech_years = self._resolve_experience_years(label)
+        total = self._answers.get("numeric", {}).get("total_experience_years")
+        general = any(g in label for g in (
+            "professional experience", "work experience", "years of professional",
+            "software eng", "software development", "programming", "in the industry",
+        ))
+        # A tech-SCOPED question ("...experience WITH <tech>") compares against
+        # that tech's years; a GENERAL "professional experience [developing X]"
+        # question compares against the career total — so a "developing ML" or
+        # "AI/ML" qualifier doesn't cap a seniority threshold at the tech's years.
+        tech_scoped = " with " in label and tech_years is not None
+        if tech_scoped:
+            yrs = int(tech_years)
+        elif general and total is not None:
+            yrs = int(total)
+        elif tech_years is not None:
+            yrs = int(tech_years)
+        elif total is not None:
+            yrs = int(total)
+        else:
+            yrs = None
+        if threshold is not None and yrs is not None:
+            return "Yes" if yrs >= threshold else "No"
+        # "Do you have experience with <known tech>?" -> Yes.
+        if tech_years is not None and int(tech_years) > 0:
+            return "Yes"
+        # General experience the applicant clearly has -> Yes.
+        if general:
+            return "Yes"
+        return None  # unknown specific tech -> let the yes/no default / LLM decide
 
     def _resolve_experience_years(self, label: str) -> str | None:
         """Match a technology in the question to the profile's years.

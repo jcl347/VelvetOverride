@@ -77,6 +77,13 @@ def date_posted_param(date_posted: str) -> str:
         days = int(m.group(1))
         if days > 0:
             return f"r{days * 86400}"
+    # Flexible hours window: past_<N>h / past_<N>_hours (e.g. past_2h -> r7200),
+    # for targeting only the very freshest postings.
+    m = re.fullmatch(r"past_(\d+)_?h(?:ours?)?", key)
+    if m:
+        hours = int(m.group(1))
+        if hours > 0:
+            return f"r{hours * 3600}"
     return ""
 
 REMOTE_MAP = {

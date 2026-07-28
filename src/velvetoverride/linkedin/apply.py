@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -135,6 +136,45 @@ def _match_clearance_option(value: str, options: list[str], label: str) -> str |
         )):
             return opt
     return None
+
+
+def _match_year_range_option(value: str, options: list[str]) -> str | None:
+    """For a "how many years ...?" dropdown whose options are year RANGES
+    ("0-1 years", "3-5 years", "5-7", "7+ years", "less than 1"), pick the option
+    whose range contains the numeric answer. Returns the option, or None if the
+    value isn't a plain number or no range matches. Prefers a bounded range over
+    an open-ended "N+" so a boundary value lands in the tighter bucket."""
+    m = re.fullmatch(r"\s*(\d+)\s*", str(value or ""))
+    if not m:
+        return None
+    n = int(m.group(1))
+    plus_match = None
+    for opt in options:
+        ol = (opt or "").lower()
+        if not re.search(r"\d", ol):
+            continue
+        rng = re.search(r"(\d+)\s*(?:-|–|—|to)\s*(\d+)", ol)
+        if rng:
+            lo, hi = int(rng.group(1)), int(rng.group(2))
+            if lo <= n <= hi:
+                return opt
+            continue
+        less = re.search(r"(?:less than|under|fewer than|below|<)\s*(\d+)", ol)
+        if less:
+            if n < int(less.group(1)):
+                return opt
+            continue
+        plus = re.search(r"(\d+)\s*\+", ol) or re.search(
+            r"(?:more than|at least|over|>=?)\s*(\d+)", ol) or re.search(
+            r"(\d+)\s*(?:or more|or greater|and above|and up)", ol)
+        if plus:
+            if n >= int(plus.group(1)) and plus_match is None:
+                plus_match = opt  # remember but prefer a bounded range first
+            continue
+        exact = re.search(r"\b(\d+)\b", ol)
+        if exact and n == int(exact.group(1)):
+            return opt
+    return plus_match
 
 NEXT_SELECTOR = (
     'button[aria-label*="Continue to next step"], '
@@ -333,6 +373,12 @@ class ApplicationFlow:
                     # Give the fix a chance to apply, then re-read
                     await random_delay(0.5, 1.0)
                     errors = await self._fix_validation_errors(fields, listing, modal)
+
+                # Capture the step AFTER answering, so the actual selections
+                # (radios ticked, dropdowns set) are visible for review — only
+                # when this step had fields worth showing.
+                if fields:
+                    await self._maybe_screenshot(listing, suffix="filled")
 
                 await random_delay(0.6, 1.2)
 
@@ -1386,6 +1432,19 @@ class ApplicationFlow:
 
                 await self._set_field_value(field, answer)
 
+                # READ-BACK VERIFICATION: re-read the live DOM value and confirm
+                # it matches what we intended. A mismatch (e.g. a radio left at
+                # its default) is flagged for review instead of being silently
+                # recorded as the intended answer.
+                verified, actual = await self._readback_field(field, answer)
+                if verified is False:
+                    needs_review = True
+                    log.warning("apply.field_unverified", label=field.label[:50],
+                                intended=str(answer)[:30], actual=str(actual)[:30])
+                elif verified is True:
+                    log.debug("apply.field_verified", label=field.label[:50],
+                              value=str(actual)[:30])
+
                 self._questions.append(QuestionRecord(
                     question_text=field.label,
                     field_type=field.field_type.value,
@@ -1531,6 +1590,14 @@ class ApplicationFlow:
                 await field.locator.select_option(label=clr, timeout=3000)
                 log.info("apply.dropdown_clearance_matched", label=field.label[:50], chose=clr)
                 return
+            # 2.8) "How many years ...?" dropdown whose options are year RANGES
+            #      ("0-1", "3-5 years", "7+") -> pick the range containing our
+            #      number, so a numeric answer like "5" isn't left unselected.
+            yr = _match_year_range_option(value, option_texts)
+            if yr is not None:
+                await field.locator.select_option(label=yr, timeout=3000)
+                log.info("apply.dropdown_year_range_matched", label=field.label[:50], chose=yr)
+                return
         except Exception:
             pass
         # 3) No confident match — do NOT pick an arbitrary option. Selecting a
@@ -1593,27 +1660,10 @@ class ApplicationFlow:
 
         for i in range(await radios.count()):
             radio = radios.nth(i)
-            radio_id = await radio.get_attribute("id")
-            matched = False
-            if radio_id and '"' not in radio_id and "\\" not in radio_id:
-                label = self._page.locator(f'label[for="{radio_id}"]')
-                if await label.count() > 0:
-                    label_text = (await label.text_content() or "").strip().lower()
-                    if value_lower in label_text or label_text in value_lower:
-                        matched = True
-            if not matched:
-                # match by wrapping-label text or value attribute
-                try:
-                    wrap = radio.locator("xpath=ancestor::label[1]")
-                    wtext = (await wrap.first.text_content() or "").strip().lower() if await wrap.count() else ""
-                except Exception:
-                    wtext = ""
-                radio_value = (await radio.get_attribute("value") or "").lower()
-                if (wtext and (value_lower in wtext or wtext in value_lower)) or \
-                   (radio_value and (value_lower in radio_value or radio_value in value_lower)):
-                    matched = True
-            if matched:
+            otext = (await self._radio_visible_text(radio)).strip().lower()
+            if self._option_matches_value(value_lower, otext):
                 await self._click_choice_input(radio)
+                await self._verify_radio(field, value, radios)
                 return
 
         # DECLINE intent (EEO / voluntary self-identification): the desired value
@@ -1661,26 +1711,216 @@ class ApplicationFlow:
         # first, which would flip the answer). If there's no yes option, leave
         # it unselected rather than guessing wrong.
         if value_lower in ("yes", "true"):
-            n = await radios.count()
-            for i in range(n):
+            for i in range(await radios.count()):
                 r = radios.nth(i)
                 try:
-                    rid = await r.get_attribute("id")
-                    txt = ""
-                    if rid and '"' not in rid and "\\" not in rid:
-                        lab = self._page.locator(f'label[for="{rid}"]')
-                        if await lab.count() > 0:
-                            txt = (await lab.first.text_content() or "").strip().lower()
-                    if not txt:
-                        wrap = r.locator("xpath=ancestor::label[1]")
-                        if await wrap.count() > 0:
-                            txt = (await wrap.first.text_content() or "").strip().lower()
+                    txt = (await self._radio_visible_text(r)).strip().lower()
                     if txt == "yes" or txt.startswith("yes"):
                         await self._click_choice_input(r)
+                        await self._verify_radio(field, value, radios)
                         return
                 except Exception:
                     continue
             log.warning("apply.radio_no_yes_option", label=field.label)
+
+        # Symmetric fallback for a NEGATIVE answer: click the option whose visible
+        # text reads "no". Prevents leaving the group at its default (often "Yes")
+        # when the primary match missed.
+        if value_lower in ("no", "false"):
+            for i in range(await radios.count()):
+                r = radios.nth(i)
+                try:
+                    txt = (await self._radio_visible_text(r)).strip().lower()
+                    if txt == "no" or txt.startswith("no,") or txt.startswith("no "):
+                        await self._click_choice_input(r)
+                        await self._verify_radio(field, value, radios)
+                        return
+                except Exception:
+                    continue
+            log.warning("apply.radio_no_no_option", label=field.label)
+
+    async def _radio_visible_text(self, radio) -> str:
+        """The visible option text for a radio, robust to LinkedIn rendering the
+        text in a sibling span rather than the label[for] (which then reads empty
+        — the bug that flipped sponsorship to Yes). Order: label[for] -> wrapping
+        <label> -> nearby sibling/parent visible text -> value attribute."""
+        try:
+            rid = await radio.get_attribute("id")
+            if rid and '"' not in rid and "\\" not in rid:
+                lab = self._page.locator(f'label[for="{rid}"]')
+                if await lab.count() > 0:
+                    t = (await lab.first.text_content() or "").strip()
+                    if t:
+                        return t
+        except Exception:
+            pass
+        try:
+            wrap = radio.locator("xpath=ancestor::label[1]")
+            if await wrap.count() > 0:
+                t = (await wrap.first.text_content() or "").strip()
+                if t:
+                    return t
+        except Exception:
+            pass
+        try:
+            t = await radio.evaluate(
+                """e => {
+                    const norm = s => (s || '').replace(/\\s+/g, ' ').trim();
+                    // Following siblings that hold THIS option's text — stop
+                    // before reaching another radio (its text is not ours).
+                    let sib = e.nextElementSibling;
+                    while (sib) {
+                        if (sib.matches && (sib.matches('input[type=radio]') ||
+                            (sib.querySelector && sib.querySelector('input[type=radio]')))) break;
+                        const t = norm(sib.innerText || sib.textContent || '');
+                        if (t && t.length <= 48) return t;
+                        sib = sib.nextElementSibling;
+                    }
+                    // Climb, but never into a container holding MORE than one radio
+                    // (that is the whole group — its text is every option joined).
+                    let p = e.parentElement;
+                    for (let i = 0; i < 3 && p; i++) {
+                        if (p.querySelectorAll('input[type=radio]').length > 1) break;
+                        const t = norm(p.innerText || p.textContent || '');
+                        if (t && t.length <= 48) return t;
+                        p = p.parentElement;
+                    }
+                    return '';
+                }"""
+            )
+            if t and t.strip():
+                return t.strip()
+        except Exception:
+            pass
+        return (await radio.get_attribute("value") or "").strip()
+
+    @staticmethod
+    def _option_matches_value(value_lower: str, otext: str) -> bool:
+        """Precise option<->value match: exact, then a "value, …"/"value …" prefix
+        (verbose options like "No, I will not require sponsorship"), then the value
+        as a WHOLE WORD — so "No" never matches "Not applicable", and an empty
+        option never matches anything."""
+        if not otext or not value_lower:
+            return False
+        if otext == value_lower:
+            return True
+        if otext.startswith(value_lower + ",") or otext.startswith(value_lower + " "):
+            return True
+        if re.search(r"\b" + re.escape(value_lower) + r"\b", otext):
+            return True
+        if len(otext) >= 3 and otext in value_lower:
+            return True
+        return False
+
+    async def _verify_radio(self, field, intended: str, radios) -> None:
+        """After selecting, log which option actually ended up checked vs what we
+        intended — so a mis-selection (e.g. sponsorship left at the default "Yes")
+        is visible instead of silently recorded as the intended value."""
+        try:
+            checked = None
+            opts = []
+            for i in range(await radios.count()):
+                r = radios.nth(i)
+                txt = " ".join((await self._radio_visible_text(r)).split())[:26]
+                opts.append(txt or "?")
+                try:
+                    if await r.is_checked():
+                        checked = txt or "?"
+                except Exception:
+                    pass
+            ok = bool(checked) and intended.strip().lower() in (checked or "").lower()
+            (log.info if ok else log.warning)(
+                "apply.radio_result", label=field.label[:48], intended=intended,
+                checked=checked, options=opts[:6],
+            )
+        except Exception:
+            pass
+
+    async def _readback_field(self, field: FormField, intended: str):
+        """Re-read a field's ACTUAL value from the live DOM after filling and
+        check it matches the intended answer. Catches selections that silently
+        didn't take — a radio left at its default, a dropdown that never set, a
+        text box that didn't accept the value. Returns:
+          True  -> verified (actual matches intended)
+          False -> MISMATCH (flag for review)
+          None  -> unverifiable (couldn't read the control; don't flag)
+        and the actual value read, as (status, actual_str).
+        """
+        ft = field.field_type
+        want = str(intended).strip().lower()
+        # Nothing intended (e.g. an optional field deliberately left blank) — an
+        # empty actual value matches that intent, so don't flag it.
+        if not want:
+            return (None, "(no value intended)")
+        # LinkedIn's résumé-method widget ("Upload resume / Tailor resume with AI")
+        # is fulfilled by the separate upload flow (verified via resume_uploaded),
+        # not by a checked radio — so skip read-back to avoid a false "none
+        # selected" flag.
+        label_l = (field.label or "").lower()
+        if "upload resume" in label_l and ("tailor" in label_l or "with ai" in label_l):
+            return (None, "resume-widget")
+        try:
+            if ft == FieldType.CHECKBOX:
+                target = want in ("yes", "true", "1")
+                actual = await field.locator.is_checked()
+                return (actual == target, "checked" if actual else "unchecked")
+
+            if ft == FieldType.RADIO:
+                name = await field.locator.get_attribute("name")
+                radios = (
+                    self._page.locator(f'input[type="radio"][name="{name}"]')
+                    if name else
+                    field.locator.locator("xpath=ancestor::fieldset").locator('input[type="radio"]')
+                )
+                checked_txt = None
+                for i in range(await radios.count()):
+                    r = radios.nth(i)
+                    try:
+                        if await r.is_checked():
+                            checked_txt = (await self._radio_visible_text(r)).strip()
+                            break
+                    except Exception:
+                        continue
+                if not checked_txt:
+                    return (False, "(none selected)")
+                return (self._option_matches_value(want, checked_txt.lower()), checked_txt)
+
+            if ft == FieldType.DROPDOWN:
+                actual = ""
+                try:
+                    actual = (await field.locator.evaluate(
+                        "e => (e.tagName === 'SELECT' && e.selectedIndex >= 0) "
+                        "? (e.options[e.selectedIndex].text || e.value || '') "
+                        ": (e.value || '')"
+                    )) or ""
+                except Exception:
+                    actual = ""
+                if not actual:
+                    try:
+                        actual = (await field.locator.input_value()) or ""
+                    except Exception:
+                        actual = ""
+                actual = actual.strip()
+                if not actual:
+                    return (None, "(unreadable)")  # custom widget — don't false-flag
+                al = actual.lower()
+                ok = (want in al or al in want or self._option_matches_value(want, al))
+                return (ok, actual[:40])
+
+            # TEXT / NUMERIC / TEXTAREA
+            actual = ""
+            try:
+                actual = (await field.locator.input_value()) or ""
+            except Exception:
+                actual = ""
+            actual = actual.strip()
+            if not actual:
+                return (False, "(empty)")
+            al = actual.lower()
+            ok = (want == al or want in al or al in want)
+            return (ok, actual[:40])
+        except Exception:
+            return (None, "")  # never false-flag on a read error
 
     async def _resolve_nav_button_llm(self, listing, allow_submit: bool):
         """Dynamic fallback for a missing Next/Submit button.
@@ -1873,15 +2113,19 @@ class ApplicationFlow:
         except Exception:
             pass
 
-    async def _maybe_screenshot(self, listing: JobListing) -> None:
-        """Capture a screenshot of the current form step if enabled."""
+    async def _maybe_screenshot(self, listing: JobListing, suffix: str = "") -> None:
+        """Capture a screenshot of the current form step if enabled. Pass a
+        suffix (e.g. "filled") to capture the state AFTER the fields are answered,
+        so a reviewer can see the actual selections (radios ticked, etc.)."""
         if not self._config.bot.get("capture_screenshots", False):
             return
-        self._screenshot_count += 1
+        if not suffix:
+            self._screenshot_count += 1
         ss_dir = Path(self._config.bot.get("screenshots_dir", "screenshots"))
         ss_dir.mkdir(parents=True, exist_ok=True)
         safe_company = "".join(c if c.isalnum() else "_" for c in listing.company)
-        filename = f"{safe_company}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_step{self._screenshot_count}.png"
+        tag = f"step{self._screenshot_count}" + (f"_{suffix}" if suffix else "")
+        filename = f"{safe_company}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{tag}.png"
         ss_path = str(ss_dir / filename)
         try:
             await self._page.screenshot(path=ss_path)
